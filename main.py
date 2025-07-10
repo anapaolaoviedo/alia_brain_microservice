@@ -20,7 +20,7 @@ async def health():
     return {"status": "BRAIN is alive and ready."}
 
 # webhook route using Pydantic
-@app.post("/webhook")
+@app.post("/webhook") 
 async def webhook(input: MessageInput):
     #  access fields directly
     print(f"Received from user {input.user_id}: {input.message}")
