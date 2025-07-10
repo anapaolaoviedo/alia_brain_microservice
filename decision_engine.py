@@ -1,4 +1,8 @@
 # decision_engine.py
+from rule_engine import RuleEngine
+from memory_manager import MemoryManager
+from nlp_pipeline import NlpPipeline
+from policy_module import PolicyModule
 
 class DecisionEngine:
     def __init__(self):
