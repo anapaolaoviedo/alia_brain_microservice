@@ -38,6 +38,6 @@ class MemoryManager:
         # to the stored dictionary, preventing unintended side effects.
         return self._sessions.get(user_id, default_state).copy()
     
-    def update_session_state(self, user_id: str, state: dict, chosen_action: dict = None):
+    def update_session_state(self, user_id: str, state: dict, chosen_action: dict = None):S
         
     
