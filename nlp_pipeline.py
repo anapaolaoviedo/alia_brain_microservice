@@ -2,7 +2,10 @@
 import re
 import spacy
 from spacy.language import Language
+#rom spacy_llm.registry import registry
 from spacy_llm.pipeline import SpacyLLM
+
+
 
 class NlpPipeline:
 
@@ -84,6 +87,10 @@ class NlpPipeline:
                 if "renovate" in normalized_text or "renew" in normalized_text or \
                    "insurance" in normalized_text or "policy" in normalized_text:
                     detected_intent = "RenovatePolicy"
+                
+                if "cancelate" in normalized_text or "cancel" in normalized_text or \
+                    "cancelate insurance" in normalized_text or "cancel policy" in normalized_text:
+                        detected_intent = "CancelRenovation"
                 
 
                 # regex for policy number 
