@@ -27,18 +27,16 @@ class DecisionEngine:
         current_state = self.memory_manager.load_context(user_id)
         current_state["current_intent"] = percept_data.get("intent", current_state.get("current_intent"))
         
-        if "entities" in percept_data and percept_data["entities"]:
-            if "entities" not in current_state:
-                current_state["entities"] = {}
-            current_state["entities"].update(percept_data["entities"])
-            
-          #specific flags based on extracted entities for easier rule checking
         if current_state["entities"].get("policy_number"):
-            current_state["policy_number_provided"] = True
+                current_state["policy_number_provided"] = True
         if current_state["entities"].get("vehicle_make") and \
-           current_state["entities"].get("vehicle_model") and \
-           current_state["entities"].get("vehicle_year"):
-            current_state["vehicle_details_provided"] = True
+               current_state["entities"].get("vehicle_model") and \
+               current_state["entities"].get("vehicle_year"):
+                current_state["vehicle_details_provided"] = True
+            
+            # NEW FLAG FOR CONTACT INFO
+        if current_state["entities"].get("email") or current_state["entities"].get("phone_number"):
+            current_state["contact_info_provided"] = True
             
         chosen_action = None
         

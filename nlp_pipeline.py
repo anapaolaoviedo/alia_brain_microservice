@@ -66,4 +66,65 @@ class NlpPipeline:
                 print("Falling back to basic keyword matching and regex for NLP.")
                 self.nlp = None
 
-        
+        def process_message(self, text: str) -> dict:
+            #RULES BASED ON THE ENTITIES NEEDED 
+            detected_intent = "Unknown"
+            extracted_entities = {}
+
+            if self.nlp:
+                doc = self.nlp(text)
+                if doc.cats:
+                    detected_intent = max(doc.cats, key=doc.cats.get)
+                for ent in doc.ents:
+                    extracted_entities[ent.label_.lower()] = ent.text
+            else:
+                #in case that the LLM hallucinates 
+                normalized_text = text.lower()
+                
+                if "renovate" in normalized_text or "renew" in normalized_text or \
+                   "insurance" in normalized_text or "policy" in normalized_text:
+                    detected_intent = "RenovatePolicy"
+                
+
+                # regex for policy number 
+                policy_number_pattern = re.compile(r'\b[A-Z]{3}\d{6}\b')
+                match = policy_number_pattern.search(text.upper())
+                if match:
+                    extracted_entities["policy_number"] = match.group(0)
+
+                # regex for email
+                email_pattern = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
+                match = email_pattern.search(text)
+                if match:
+                    extracted_entities["email"] = match.group(0)
+
+                # regex for phone number 
+                phone_pattern = re.compile(r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b')
+                match = phone_pattern.search(text)
+                if match:
+                    extracted_entities["phone_number"] = match.group(0)
+                
+                # regex for vin
+                vin_pattern = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
+                match = vin_pattern.search(text.upper())
+                if match:
+                    extracted_entities["vin"] = match.group(0)
+                
+                # regex for car brand 
+                car_makes = ["honda", "toyota", "ford", "vw", "audi", "vento"] # <- might need to automate for the models 
+                for make in car_makes:
+                    if make in normalized_text:
+                        extracted_entities["vehicle_make"] = make.capitalize()
+                        break
+                # regex for year of the car 
+                year_pattern = re.compile(r'\b(19|20)\d{2}\b')
+                match = year_pattern.search(text)
+                if match:
+                    extracted_entities["vehicle_year"] = match.group(0)
+                
+            #this must be returned to desicion_engine and possibly policy module, concrete on memory_manager too 
+            return {
+                "intent": detected_intent,
+                "entities": extracted_entities
+            }
+    
