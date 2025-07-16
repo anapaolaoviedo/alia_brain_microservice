@@ -38,7 +38,39 @@ BRAIN rejects shallow pre-built templates and embraces foundational design. Ever
 ##  Architecture Overview
 
 ```plaintext
-Percepts (inputs) 
+User sends WhatsApp message
+        ↓
+Make.com receives and forwards (as JSON)
+        ↓
+FastAPI webhook (main.py) receives JSON
+        ↓
+NLP Pipeline (nlp_pipeline.py)
+   - Parse text
+   - Extract intent and entities
+        ↓
+Memory Manager (memory_manager.py)
+   - Load or update session state
+        ↓
+Decision Engine (decision_engine.py)
+   - Core orchestrator logic
+   - Calls Rule Engine (rule_engine.py) for constraints
+   - Calls Policy Module (policy_module.py) for suggestions
+        ↓
+Rule Engine (rule_engine.py)
+   - Check safety rules
+   - Validate slots & guardrails
+        ↓
+Decision finalized (best action chosen)
+        ↓
+Memory Manager updates session context
+        ↓
+Create JSON reply
+        ↓
+Send reply back to Make.com
+        ↓
+WhatsApp API
+        ↓
+User receives responsePercepts (inputs) 
     ↓
 NLP Pipeline (parse & extract) 
     ↓
