@@ -99,12 +99,12 @@ class NlpPipeline:
             # Fallback to basic keyword matching and regex if spaCy-LLM failed to load
             normalized_text = text.lower()
             
-            if "renovate" in normalized_text or "renew" in normalized_text or \
-               "insurance" in normalized_text or "policy" in normalized_text:
+            if "renovar" in normalized_text or "renovacion" in normalized_text or \
+               "renovar garantia" in normalized_text or "renovacion de garantia" in normalized_text:
                 detected_intent = "RenovatePolicy"
             
-            if "cancelate" in normalized_text or "cancel" in normalized_text or \
-                "cancelate insurance" in normalized_text or "cancel policy" in normalized_text:
+            if "cancelar" in normalized_text or "cancelarla" in normalized_text or \
+                "cancelar renovacion" in normalized_text or "cancelar proceso" in normalized_text:
                     detected_intent = "CancelRenovation"
             
             # Basic regex for policy number
