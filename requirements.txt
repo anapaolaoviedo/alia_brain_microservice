@@ -4,3 +4,4 @@ pydantic
 redis
 spacy
 scikit-learn
+spacy-llm

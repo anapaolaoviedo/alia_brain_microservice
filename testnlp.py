@@ -6,7 +6,12 @@ if __name__ == "__main__":
 
     # Test message
     test_text = """
-    how can i just like the insurance to cancelate?
+    Hola, me interesa renovar mi póliza de seguro. 
+    Mi número de póliza es ABC123456. 
+    Mi carro es un Toyota Corolla 2020, 
+    correo: usuario@correo.com, 
+    teléfono: +5215548300145, 
+    VIN: 1HGCM82633A123456
     """
 
     result = pipeline.process_message(test_text)
