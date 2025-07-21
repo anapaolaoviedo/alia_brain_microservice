@@ -1,83 +1,50 @@
 # nlp_pipeline.py
 import re
 import spacy
-from spacy.language import Language # Still useful for type hinting, but not strictly required for this approach
-# No direct import of SpacyLLM anymore!
+import os
+from dotenv import load_dotenv
+from spacy.language import Language
+
+# .env file
+load_dotenv()
+#making sure the connection is up 
+print("🔐 OpenAI Key loaded:", os.getenv("OPENAI_API_KEY")[:8] + "...")
 
 
 class NlpPipeline:
     """
     BRAIN's primary sensor, now enhanced with Large Language Model capabilities
     via spaCy-LLM. This module processes raw text percepts, leveraging an LLM
-    (like Google Gemini) for advanced intent classification and entity extraction.
+    (like OpenAI) for advanced intent classification and entity extraction.
     """
     def __init__(self):
         """
         Initializes the NLP pipeline with a base spaCy model and integrates
-        a spaCy-LLM component for LLM-powered text processing.
+        spaCy-LLM components for LLM-powered text processing.
         """
         try:
             # 1. Load a base spaCy model (for tokenization, sentence segmentation, etc.)
             self.nlp = spacy.load("en_core_web_sm")
 
-            # 2. Add the spaCy-LLM component to the pipeline using its registered factory name "llm"
-            # The configuration for the LLM model, API, and tasks is passed directly to add_pipe.
-            # This is a more robust way to integrate spacy-llm and avoids direct class imports.
+            # 2. Add a single spaCy-LLM component for text classification only
+            # Note: We'll handle NER in the fallback for now to avoid complex multi-task setup
+            
             self.nlp.add_pipe(
-                "llm", # This is the registered factory name for the spaCy-LLM component
-                name="llm_processor",
+                "llm",
+                name="llm_textcat",
                 config={
                     "model": {
-                        "name": "gpt-3.5-turbo",
-                        "api": "openai"
+                        "@llm_models": "spacy.GPT-3-5.v1",
+                        "name": "gpt-3.5-turbo"
                     },
-                    "tasks": {
-                        "intent_classification": {
-                            "task": "textcat",
-                            "labels": ["RenovatePolicy", "GetQuote", "QueryPolicyDetails", "CancelRenovation", "Greeting", "RequestSupport", "Unknown"],
-                            "prompt": """
-                                You are an AI assistant for a car insurance company.
-                                Classify the user's intent from the following message.
-                                Choose one of these labels: RenovatePolicy, GetQuote, QueryPolicyDetails, CancelRenovation, Greeting, RequestSupport, Unknown.
-                                If the user wants to renew or extend their car insurance, use 'RenovatePolicy'.
-                                If they are asking for a price or estimate, use 'GetQuote'.
-                                If they are asking about their existing policy details, use 'QueryPolicyDetails'.
-                                If they want to cancel a renovation or policy, use 'CancelRenovation'.
-                                If it's a general greeting, use 'Greeting'.
-                                If they explicitly ask for help or support, use 'RequestSupport'.
-                                Otherwise, use 'Unknown'.
-
-                                Text: {text}
-                                Intent:
-                            """
-                        },
-                        "entity_extraction": {
-                            "task": "ner",
-                            "labels": ["POLICY_NUMBER", "VEHICLE_MAKE", "VEHICLE_MODEL", "VEHICLE_YEAR", "RENOVATION_DATE", "CUSTOMER_NAME", "EMAIL", "PHONE_NUMBER", "VIN", "CUSTOMER_ID"],
-                            "prompt": """
-                                You are an AI assistant for a car insurance company.
-                                Extract the following entities from the user's message related to car insurance renovation.
-                                If an entity is not present, do not include it.
-
-                                - POLICY_NUMBER: The alphanumeric policy identifier (e.g., ABC123456, XYZ987654).
-                                - VEHICLE_MAKE: The manufacturer of the vehicle (e.g., Honda, Toyota).
-                                - VEHICLE_MODEL: The specific model of the vehicle (e.g., Civic, Camry).
-                                - VEHICLE_YEAR: The manufacturing year of the vehicle (e.g., 2020, 2023).
-                                - RENOVATION_DATE: The desired date for policy renovation (e.g., tomorrow, July 15th, 2025).
-                                - CUSTOMER_NAME: The name of the customer.
-                                - EMAIL: The customer's email address (e.g., example@domain.com).
-                                - PHONE_NUMBER: The customer's phone number, including country code if available (e.g., +5215548300145, 555-123-4567).
-                                - VIN: The Vehicle Identification Number (a 17-character alphanumeric code).
-                                - CUSTOMER_ID: A unique identifier for the customer.
-
-                                Text: {text}
-                                Entities:
-                            """
-                        }
+                    "task": {
+                        "@llm_tasks": "spacy.TextCat.v1",
+                        "labels": "RenovatePolicy,GetQuote,QueryPolicyDetails,CancelRenovation,Greeting,RequestSupport,Unknown"
                     }
                 },
-                last=True # Add it as the last component in the pipeline
+                last=True
             )
+            
             print("NLP Pipeline initialized with spaCy-LLM (OpenAI): Ready to perceive")
 
         except Exception as e:
@@ -90,62 +57,86 @@ class NlpPipeline:
         extracted_entities = {}
 
         if self.nlp:
-            doc = self.nlp(text)
-            if doc.cats:
-                detected_intent = max(doc.cats, key=doc.cats.get)
-            for ent in doc.ents:
-                extracted_entities[ent.label_.lower()] = ent.text
-        else:
-            # Fallback to basic keyword matching and regex if spaCy-LLM failed to load
+            print(f"\n--- DEBUG: Processing with LLM for text: '{text}' ---")
+            try:
+                doc = self.nlp(text)
+                print(f"--- DEBUG: Raw doc.cats: {doc.cats}")
+                print(f"--- DEBUG: Raw doc.ents: {[(ent.text, ent.label_) for ent in doc.ents]}")
+
+                if doc.cats:
+                    detected_intent = max(doc.cats, key=doc.cats.get)
+                else:
+                    print("--- DEBUG: doc.cats is empty or None. LLM might not have classified intent.")
+
+                for ent in doc.ents:
+                    extracted_entities[ent.label_.lower()] = ent.text
+                
+                if not doc.ents:
+                    print("--- DEBUG: doc.ents is empty. LLM might not have extracted entities.")
+
+            except Exception as llm_error:
+                print(f"--- DEBUG: Error during LLM processing: {llm_error}")
+                print("--- DEBUG: Falling back to regex/keyword due to LLM error.")
+                self.nlp = None # Disable LLM for subsequent calls if it fails once
+                return self.process_message(text) # Recursive call to use fallback
+
+        # This 'else' block (and the recursive call above) handles the fallback
+        if not self.nlp: # This condition will be true if LLM failed or was never initialized
+            print("--- DEBUG: Processing with Fallback (Keyword/Regex) ---")
             normalized_text = text.lower()
             
+            # Intent Fallback
             if "renovar" in normalized_text or "renovacion" in normalized_text or \
-                "renovar poliza" in normalized_text or "renovacion de poliza" in normalized_text or \
-                "renovarla" in normalized_text or "renovarlo" in normalized_text or \
+               "renovar poliza" in normalized_text or "renovacion de poliza" in normalized_text or \
+               "renovarla" in normalized_text or "renovarlo" in normalized_text or \
                "renovar garantia" in normalized_text or "renovacion de garantia" in normalized_text:
                 detected_intent = "RenovatePolicy"
-            
-            if "cancelar" in normalized_text or "cancelarla" in normalized_text or \
-                "cancelar renovacion" in normalized_text or "cancelar proceso" in normalized_text:
-                    detected_intent = "CancelRenovation"
-            
-            # Basic regex for policy number
+            elif "cancelar" in normalized_text or "cancelarla" in normalized_text or \
+                 "cancelar renovacion" in normalized_text or "cancelar proceso" in normalized_text:
+                detected_intent = "CancelRenovation"
+            elif "hola" in normalized_text or "que tal" in normalized_text:
+                detected_intent = "Greeting"
+            elif "ayuda" in normalized_text or "soporte" in normalized_text:
+                detected_intent = "RequestSupport"
+
+            # Entity Fallback (Regex and keyword matching)
             policy_number_pattern = re.compile(r'\b[A-Z]{3}\d{6}\b')
             match = policy_number_pattern.search(text.upper())
             if match:
                 extracted_entities["policy_number"] = match.group(0)
 
-            # Basic regex for email
             email_pattern = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
             match = email_pattern.search(text)
             if match:
                 extracted_entities["email"] = match.group(0)
 
-            # Basic regex for phone number
             phone_pattern = re.compile(r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b')
             match = phone_pattern.search(text)
             if match:
                 extracted_entities["phone_number"] = match.group(0)
             
-            # Basic regex for vin
             vin_pattern = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
             match = vin_pattern.search(text.upper())
             if match:
                 extracted_entities["vin"] = match.group(0)
             
-            # Basic regex for car brand
-            car_makes = ["honda", "toyota", "ford", "vw", "audi", "vento"]
+            car_makes = ["honda", "toyota", "ford", "vw", "audi", "vento", "nissan", "chevrolet"]
             for make in car_makes:
                 if make in normalized_text:
                     extracted_entities["vehicle_make"] = make.capitalize()
                     break
-            # Basic regex for year of the car
+            
             year_pattern = re.compile(r'\b(19|20)\d{2}\b')
             match = year_pattern.search(text)
             if match:
                 extracted_entities["vehicle_year"] = match.group(0)
             
-            return {
-                "intent": detected_intent,
-                "entities": extracted_entities
-            }
+            if "my name is " in normalized_text:
+                name_part = normalized_text.split("my name is ", 1)[1].split(" ")[0]
+                if name_part:
+                    extracted_entities["customer_name"] = name_part.capitalize()
+            
+        return {
+            "intent": detected_intent,
+            "entities": extracted_entities
+        }
