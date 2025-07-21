@@ -28,8 +28,8 @@ class NlpPipeline:
                 name="llm_processor",
                 config={
                     "model": {
-                        "name": "gemini-2.0-flash",
-                        "api": "gemini"
+                        "name": "gpt-3.5-turbo",
+                        "api": "openai"
                     },
                     "tasks": {
                         "intent_classification": {
@@ -78,7 +78,7 @@ class NlpPipeline:
                 },
                 last=True # Add it as the last component in the pipeline
             )
-            print("NLP Pipeline initialized with spaCy-LLM (Gemini): Ready to perceive")
+            print("NLP Pipeline initialized with spaCy-LLM (OpenAI): Ready to perceive")
 
         except Exception as e:
             print(f"Error initializing spaCy-LLM: {e}")
@@ -100,6 +100,8 @@ class NlpPipeline:
             normalized_text = text.lower()
             
             if "renovar" in normalized_text or "renovacion" in normalized_text or \
+                "renovar poliza" in normalized_text or "renovacion de poliza" in normalized_text or \
+                "renovarla" in normalized_text or "renovarlo" in normalized_text or \
                "renovar garantia" in normalized_text or "renovacion de garantia" in normalized_text:
                 detected_intent = "RenovatePolicy"
             
