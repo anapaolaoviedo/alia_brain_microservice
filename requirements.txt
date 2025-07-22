@@ -5,3 +5,4 @@ redis
 spacy
 scikit-learn
 spacy-llm
+python-dotenv
