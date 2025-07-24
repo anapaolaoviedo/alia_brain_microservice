@@ -108,6 +108,10 @@ class MemoryManager:
             print("PostgreSQL tables checked/created successfully.")
         except psycopg2.Error as e:
             print(f"ERROR: Failed to create PostgreSQL tables: {e}")
+            
+        def _get_redis_key(self, user_id: str) -> str:
+        #mainlyyy to generate a consistent rediss key for like the user sessions
+            return f"session:{user_id}"
         
         
 
