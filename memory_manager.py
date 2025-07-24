@@ -69,7 +69,45 @@ class MemoryManager:
 
         print("Memory Manager initialized: Ready to remember!")
         
-    def _create_tables_of_not_exists(self):
+    def _create_tables_if_not_exists(self):
+        """
+        Creates necessary PostgreSQL tables if they do not already exist.
+        This method is called during initialization if a PG connection is successful.
+        """
+        if not self.pg_conn: # only works if PG is actually werking
+            return
+
+        try:
+            with self.pg_conn.cursor() as cur:
+                #okis we star with the long term memory queries
+                #  mutable data like name, email, VIN
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_profiles (
+                        user_id VARCHAR(255) PRIMARY KEY,
+                        customer_name VARCHAR(255),
+                        email VARCHAR(255),
+                        phone_number VARCHAR(255),
+                        vin VARCHAR(17),
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                # now a table for transcript of convos between brain and the client 
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS conversation_log (
+                        log_id SERIAL PRIMARY KEY,
+                        user_id VARCHAR(255) NOT NULL,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        role VARCHAR(10) NOT NULL, -- 'user' or 'agent'
+                        message TEXT NOT NULL,
+                        intent VARCHAR(255),
+                        entities JSONB, -- JSONB for flexible storage of extracted entities
+                        action_type VARCHAR(255),
+                        FOREIGN KEY (user_id) REFERENCES user_profiles (user_id)
+                    );
+                """)
+            print("PostgreSQL tables checked/created successfully.")
+        except psycopg2.Error as e:
+            print(f"ERROR: Failed to create PostgreSQL tables: {e}")
         
         
 
