@@ -133,6 +133,30 @@ class MemoryManager:
             "conversation_summary": "" #  build a running summary for human handoff
         }
         
+            if self.r: # if the Redis connection is active and onging
+                redis_key = self._get_redis_key(user_id)
+                try:
+                    if self.redis_json_available:
+                    # we dk if the resinJson is abaliable but if it is, must use that 
+                        stored_state = self.r.json().get(redis_key, '$')
+                        if stored_state and isinstance(stored_state, list) and len(stored_state) > 0:
+                            return stored_state[0] # returneturn the first (and ONLYY!!!) JSON document
+                    else:
+                    # hmm if redisjson doesntwork parse manually the json
+                        stored_json_string = self.r.get(redis_key)
+                        if stored_json_string:
+                            return json.loads(stored_json_string)
+                except Exception as e:
+                    print(f"Error retrieving state for {user_id} from Redis: {e}. Returning default state.")
+                # show the error but it doesnr crash because the fallbacck parser is there 
+
+            # if redis is not connected, or an error occurred, or no state found, return default
+            # also lets handle the case where self._in_memory_sessions might not be initialized if redi was the first posible oath
+            if not self.r and hasattr(self, '_in_memory_sessions'):
+                return self._in_memory_sessions.get(user_id, default_state).copy()
+        
+            return default_state.copy() #  a copy of default if no state found in Redis or in-memory fallback
+        
         
 
         
