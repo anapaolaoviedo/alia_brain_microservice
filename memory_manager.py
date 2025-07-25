@@ -157,6 +157,39 @@ class MemoryManager:
         
             return default_state.copy() #  a copy of default if no state found in Redis or in-memory fallback
         
+        def update_session_state(self, user_id:str, state: dict, user_message: str, chosen_action:dict = None ):
+            '''
+            Mainly for updating the session state in Redis and just keep the long term relevant data into postgresql
+            
+            args: the users id, the state, the message from the user and the chosen action from the agent
+            '''
+            #update flags
+            if state["entities"].get("email") or state["entities"].get("phone_number"):
+                state["contact_info_provided"] = True
+            if state["entities"].get("policy_number"):
+                state["policy_number_provided"] = True
+            if state["entities"].get("vehicle_make") and \
+            state["entities"].get("vehicle_model") and \
+            state["entities"].get("vehicle_year"):
+                state["vehicle_details_provided"] = True
+                
+            #update convo summary for the state in redis 
+            #also for the convo summary thata gonne be sent to human scale
+            if "conversation_summary" not in state:
+                state["conversation_summary"] = ""
+        
+            # get the user message  message to the summary
+            state["conversation_summary"] += f"User: {user_message} | "
+        
+            # get agents message to the summary
+            if chosen_action and chosen_action.get("message_to_customer"):
+                state["conversation_summary"] += f"Agent: {chosen_action['message_to_customer']} | "
+            elif chosen_action and chosen_action.get("message"): # Fallback for generic 'message' key
+                state["conversation_summary"] += f"Agent: {chosen_action['message']} | "
+
+            
+            
+        
         
 
         
