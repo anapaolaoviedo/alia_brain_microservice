@@ -113,6 +113,26 @@ class MemoryManager:
         #mainlyyy to generate a consistent rediss key for like the user sessions
             return f"session:{user_id}"
         
+        def get_session_state(self, user_id:str) -> dict:
+            '''
+            Here we check for the current session state for the given user. 
+            
+            arguments: userd_id which is a string 
+            returns: a json structured dict of everything realted to that user 
+            '''
+            default_state = {
+            "session_id": user_id,
+            "current_intent": None,
+            "entities": {}, # stores extracted entities like policy_number, email, etcc
+            "policy_number_provided": False,
+            "vehicle_details_provided": False,
+            "contact_info_provided": False,
+            "quote_provided": False,
+            "renovation_lead_notified": False, #  the human team has been notified
+            "status": "new_session", # rack the current stage of the renovation process
+            "conversation_summary": "" #  build a running summary for human handoff
+        }
+        
         
 
         
