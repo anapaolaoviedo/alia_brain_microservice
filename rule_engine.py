@@ -1,4 +1,5 @@
-        # rule_engine.py
+# rule_engine.py
+from typing import Optional # Import Optional for type hinting
 
 class RuleEngine:
     '''
@@ -8,7 +9,7 @@ class RuleEngine:
     def __init__(self):
         print("Rule Engine initialized: Ready for explicit rules.")
 
-    def evaluate_rules(self, state: dict) -> dict | None:
+    def evaluate_rules(self, state: dict) -> Optional[dict]: # CORRECTED: Use Optional[dict]
         """
         Evaluates a set of predefined rules based on the current state.
         For now, it always returns None, deferring to the PolicyModule.
@@ -17,7 +18,7 @@ class RuleEngine:
         state (dict): The current state of the conversation.
 
         Returns:
-        dict | None: An action dictionary if a rule fires, otherwise None.
+        Optional[dict]: An action dictionary if a rule fires, otherwise None.
         """
         # For today, we'll make this always return None so the DecisionEngine
         # falls back to the PolicyModule. SOOOONNN ->>>
