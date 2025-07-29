@@ -44,11 +44,11 @@ class NlpPipeline:
                     name="intent_classifier",
                     config={
                         "model": {
-                            "@llm_models": "spacy.GPT-3-5.v2",
-                            "name": "gpt-3.5-turbo",
+                            "@llm_models": "spacy.GPT-4.v3", # CORRECTED FACTORY FOR GPT-4o-mini
+                            "name": "gpt-4o-mini",          # UPDATED MODEL NAME
                             "config": {
-                                "temperature": 0.1,  # Lower temperature for more consistent results
-                                "max_tokens": 50     # Limit tokens for faster responses
+                                "temperature": 0.1,
+                                "max_tokens": 50
                             }
                         },
                         "task": {
@@ -80,8 +80,8 @@ Intent:"""
                     name="entity_extractor", 
                     config={
                         "model": {
-                            "@llm_models": "spacy.GPT-3-5.v2",
-                            "name": "gpt-3.5-turbo",
+                            "@llm_models": "spacy.GPT-4.v3", # CORRECTED FACTORY FOR GPT-4o-mini
+                            "name": "gpt-4o-mini",          # UPDATED MODEL NAME
                             "config": {
                                 "temperature": 0.1,
                                 "max_tokens": 200
@@ -168,7 +168,7 @@ Entities:"""
                 self.llm_failed_count += 1
                 print(f"LLM Error (attempt {self.llm_failed_count}): {llm_error}")
                 
-                if "429" in str(llm_error):
+                if "429" in str(llm_error) or "Rate limit" in str(llm_error):
                     print(f"Rate limited. Waiting {self.retry_delay}s before fallback...")
                     time.sleep(self.retry_delay)
                 
@@ -216,11 +216,11 @@ Entities:"""
 
         # Enhanced Entity Extraction with better patterns
         patterns = {
-            "policy_number": r'\b[A-Z]{2,4}\d{5,8}\b',  # More flexible policy number pattern
+            "policy_number": r'\b[A-Z]{2,4}\d{5,8}\b',
             "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
             "phone_number": r'(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{4,6}',
             "vin": r'\b[A-HJ-NPR-Z0-9]{17}\b',
-            "vehicle_year": r'\b(19[8-9]\d|20[0-4]\d)\b',  # 1980-2049
+            "vehicle_year": r'\b(19[8-9]\d|20[0-4]\d)\b',
             "customer_id": r'\b(?:ID|id|Id)[-:\s]*([A-Z0-9]{4,12})\b'
         }
         
@@ -230,7 +230,6 @@ Entities:"""
             search_text = text.upper() if entity_type in ["policy_number", "vin"] else text
             match = re.search(pattern, search_text, flags)
             if match:
-                # For customer_id, extract the captured group
                 extracted_entities[entity_type] = match.group(1) if entity_type == "customer_id" else match.group(0)
         
         # Enhanced car makes detection
@@ -257,7 +256,8 @@ Entities:"""
                 break
         
         # Enhanced model detection (basic patterns)
-        common_models = ["civic", "accord", "corolla", "camry", "focus", "fiesta", "sentra", "altima"]
+        common_models = ["civic", "accord", "corolla", "camry", "focus", "fiesta", "sentra", "altima",
+                         "vento", "versa", "cr-v", "rav4", "f-150", "silverado", "jetta", "golf"]
         for model in common_models:
             if model in normalized_text:
                 extracted_entities["vehicle_model"] = model.capitalize()
@@ -265,10 +265,10 @@ Entities:"""
         
         # Enhanced name extraction
         name_patterns = [
-            (r"my name is ([A-Za-z]+(?:\s+[A-Za-z]+)?)", 1),
-            (r"me llamo ([A-Za-z]+(?:\s+[A-Za-z]+)?)", 1),
-            (r"soy ([A-Za-z]+(?:\s+[A-Za-z]+)?)", 1),
-            (r"nombre[:\s]+([A-Za-z]+(?:\s+[A-Za-z]+)?)", 1)
+            (r"my name is ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
+            (r"me llamo ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
+            (r"soy ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
+            (r"nombre[:\s]+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1)
         ]
         
         for pattern, group in name_patterns:
