@@ -6,6 +6,10 @@ import redis
 import json
 from dotenv import load_dotenv
 
+'''
+Purely to test the merging of nlp_pipeline, decision_engine and memory_manager
+'''
+
 # Load environment variables for the test script
 load_dotenv()
 

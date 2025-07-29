@@ -6,6 +6,10 @@ import redis
 import json # Ensure json is imported for dumps/loads if RedisJSON isn't used
 from dotenv import load_dotenv # Load .env for test script too
 
+'''
+Purely to test that the states and memory storage is working.
+'''
+
 # Load environment variables from .env file for the test script
 load_dotenv()
 
