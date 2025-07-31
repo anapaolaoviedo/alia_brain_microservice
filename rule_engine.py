@@ -62,4 +62,21 @@ class RuleEngine:
                     "conversation_summary": conversation_summary
                 }
             }
+         # Rule 2: Answer "Cuánto cuesta renovar la garantía?" (GetQuote intent)
+        # This is a direct answer from the FAQs.
+        if state.get("current_intent") == "GetQuote":
+            print("Rule Fired: Provide Renovation Cost Info")
+            return {
+                "action_type": "provide_info",
+                "message": "Los costos de renovación de Garantía Extendida son:\n"
+                           "Cobertura de 12 meses: $9,900.00\n"
+                           "Cobertura de 24 meses: $14,900.00\n"
+                           "Cobertura de 36 meses: $21,900.00\n"
+                           "Cobertura de 48 meses: $28,900.00",
+                "message_to_customer": "Los costos de renovación de Garantía Extendida son:\n"
+                                       "Cobertura de 12 meses: $9,900.00\n"
+                                       "Cobertura de 24 meses: $14,900.00\n"
+                                       "Cobertura de 36 meses: $21,900.00\n"
+                                       "Cobertura de 48 meses: $28,900.00"
+            }           
     
