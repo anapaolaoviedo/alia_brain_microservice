@@ -3,218 +3,163 @@ import re
 import spacy
 import os
 import time
+import json
+import openai
 from dotenv import load_dotenv
-from spacy.language import Language
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
-# Print only first 8 chars of key for security
 print("🔐 OpenAI Key loaded:", os.getenv("OPENAI_API_KEY")[:8] + "...")
-
 
 class NlpPipeline:
     """
-    BRAIN's primary sensor, now enhanced with Large Language Model capabilities
-    via spaCy-LLM. This module processes raw text percepts, leveraging an LLM
-    (like OpenAI) for advanced intent classification and entity extraction.
+    BRAIN's primary sensor with direct OpenAI integration and robust fallback.
+    Simplified approach that bypasses spaCy-LLM configuration issues.
     """
     def __init__(self, use_llm=True, retry_delay=2.0):
-        """
-        Initializes the NLP pipeline with a base spaCy model and integrates
-        spaCy-LLM components for LLM-powered text processing.
-        
-        Args:
-            use_llm (bool): Whether to attempt LLM initialization
-            retry_delay (float): Delay between retries in seconds
-        """
         self.use_llm = use_llm
         self.retry_delay = retry_delay
         self.llm_failed_count = 0
-        self.max_llm_failures = 3  # Temporarily disable LLM after 3 consecutive failures
+        self.max_llm_failures = 3
         
+        # Initialize OpenAI client
         if self.use_llm:
             try:
-                # 1. Load a base spaCy model (for tokenization, sentence segmentation, etc.)
-                self.nlp = spacy.load("en_core_web_sm")
-
-                # 2. Add separate LLM components for textcat and NER
-                # Intent Classification Component
-                self.nlp.add_pipe(
-                    "llm_textcat",
-                    name="intent_classifier",
-                    config={
-                        "model": {
-                            "@llm_models": "spacy.GPT-4.v3", # CORRECTED FACTORY FOR GPT-4o-mini
-                            "name": "gpt-4o-mini",          # UPDATED MODEL NAME
-                            "config": {
-                                "temperature": 0.1,
-                                "max_tokens": 50
-                            }
-                        },
-                        "task": {
-                            "@llm_tasks": "spacy.TextCat.v3",
-                            "labels": ["RenovatePolicy", "GetQuote", "QueryPolicyDetails", 
-                                     "CancelRenovation", "Greeting", "RequestSupport", "Unknown"],
-                            "template": """You are an AI assistant for a car insurance company.
-Classify the user's intent from the following message.
-Choose ONLY ONE of these labels: RenovatePolicy, GetQuote, QueryPolicyDetails, CancelRenovation, Greeting, RequestSupport, Unknown.
-
-Rules:
-- RenovatePolicy: user wants to renew/extend car insurance
-- GetQuote: asking for price/estimate  
-- QueryPolicyDetails: asking about existing policy details
-- CancelRenovation: wants to cancel renovation/policy
-- Greeting: general greeting (hola, hello, hi)
-- RequestSupport: explicitly asks for help/support
-- Unknown: anything else
-
-Text: {{text}}
-Intent:"""
-                        }
-                    }
-                )
-
-                # Named Entity Recognition Component  
-                self.nlp.add_pipe(
-                    "llm_ner",
-                    name="entity_extractor", 
-                    config={
-                        "model": {
-                            "@llm_models": "spacy.GPT-4.v3", # CORRECTED FACTORY FOR GPT-4o-mini
-                            "name": "gpt-4o-mini",          # UPDATED MODEL NAME
-                            "config": {
-                                "temperature": 0.1,
-                                "max_tokens": 200
-                            }
-                        },
-                        "task": {
-                            "@llm_tasks": "spacy.NER.v3",
-                            "labels": ["POLICY_NUMBER", "VEHICLE_MAKE", "VEHICLE_MODEL", 
-                                     "VEHICLE_YEAR", "RENOVATION_DATE", "CUSTOMER_NAME", 
-                                     "EMAIL", "PHONE_NUMBER", "VIN", "CUSTOMER_ID"],
-                            "template": """Extract entities from this car insurance message.
-Only extract entities that are clearly present.
-
-Types:
-- POLICY_NUMBER: ABC123456, XYZ987654  
-- VEHICLE_MAKE: Honda, Toyota, Ford
-- VEHICLE_MODEL: Civic, Camry, Focus
-- VEHICLE_YEAR: 2020, 2023
-- RENOVATION_DATE: tomorrow, July 15th
-- CUSTOMER_NAME: person's name
-- EMAIL: email@domain.com
-- PHONE_NUMBER: +5215548300145, 555-123-4567
-- VIN: 17-character code
-- CUSTOMER_ID: unique ID
-
-Text: {{text}}
-Entities:"""
-                        }
-                    },
-                    last=True
-                )
-                
-                print("NLP Pipeline initialized with spaCy-LLM (OpenAI): Ready to perceive")
-
+                openai.api_key = os.getenv("OPENAI_API_KEY")
+                self.client = openai.OpenAI()
+                print("NLP Pipeline initialized with direct OpenAI integration: Ready to perceive")
             except Exception as e:
-                print(f"Error initializing spaCy-LLM: {e}")
+                print(f"Error initializing OpenAI: {e}")
                 print("Falling back to keyword/regex processing")
-                self.nlp = None
+                self.client = None
         else:
             print("NLP Pipeline initialized in fallback mode (keyword/regex only)")
-            self.nlp = None
+            self.client = None
+
+        # Load basic spaCy model for text preprocessing
+        try:
+            self.nlp_basic = spacy.load("en_core_web_sm")
+        except:
+            print("Warning: spaCy model not found. Using basic text processing.")
+            self.nlp_basic = None
 
     def process_message(self, text: str) -> dict:
         """Process a message and return intent and entities"""
         detected_intent = "Unknown"
         extracted_entities = {}
 
-        # Check if we should try LLM (not disabled due to too many failures)
-        if self.nlp and self.llm_failed_count < self.max_llm_failures:
-            print(f"\nProcessing with LLM for text: '{text.strip()}'")
+        if self.client and self.llm_failed_count < self.max_llm_failures:
+            print(f"\n--- DEBUG: Processing with OpenAI LLM for text: '{text.strip()}' ---")
             try:
-                doc = self.nlp(text)
+                # Direct OpenAI API call
+                response = self.client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """You are an AI assistant for a car insurance company. 
+                            
+                            Classify the user's intent into ONE of: RenovatePolicy, GetQuote, QueryPolicyDetails, CancelRenovation, Greeting, RequestSupport, ConfirmRenovation, Unknown.
+                            
+                            Extract entities for: POLICY_NUMBER, VEHICLE_MAKE, VEHICLE_MODEL, VEHICLE_YEAR, CUSTOMER_NAME, EMAIL, PHONE_NUMBER, VIN.
+                            
+                            IMPORTANT CONTEXT RULES:
+                            - If user says "sí", "confirmo", "proceda", "adelante" after discussing renovation = ConfirmRenovation
+                            - "renovar", "renovación" = RenovatePolicy
+                            - Always preserve and extract policy numbers, names, emails, vehicle info
+                            
+                            Respond ONLY with valid JSON:
+                            {"intent": "IntentName", "entities": {"entity_type": "value"}}"""
+                        },
+                        {
+                            "role": "user", 
+                            "content": text
+                        }
+                    ],
+                    temperature=0.1,
+                    max_tokens=300
+                )
                 
-                # Get intent from text classification
-                if doc.cats:
-                    detected_intent = max(doc.cats, key=doc.cats.get)
-                    confidence = doc.cats[detected_intent]
-                    print(f"LLM Intent: {detected_intent} (confidence: {confidence:.2f})")
-                else:
-                    print("No intent classification from LLM")
+                # Parse the response
+                content = response.choices[0].message.content.strip()
+                
+                # Clean JSON response (remove markdown if present)
+                if content.startswith("```json"):
+                    content = content.replace("```json", "").replace("```", "").strip()
+                
+                parsed_output = json.loads(content)
+                detected_intent = parsed_output.get("intent", "Unknown")
+                extracted_entities = parsed_output.get("entities", {})
 
-                # Extract entities
-                for ent in doc.ents:
-                    extracted_entities[ent.label_.lower()] = ent.text
-                
-                if doc.ents:
-                    print(f"LLM Entities: {extracted_entities}")
-                else:
-                    print("No entities extracted by LLM")
-                
+                print(f"--- DEBUG: LLM Intent: {detected_intent}")
+                print(f"--- DEBUG: LLM Entities: {extracted_entities}")
+
                 # Reset failure count on success
                 self.llm_failed_count = 0
                 
                 # If LLM didn't find much, supplement with fallback
                 if detected_intent == "Unknown" or not extracted_entities:
-                    print("🔄 Supplementing with fallback processing...")
+                    print("Supplementing with fallback processing...")
                     fallback_intent, fallback_entities = self._fallback_processing(text)
                     if detected_intent == "Unknown":
                         detected_intent = fallback_intent
                     extracted_entities.update({k: v for k, v in fallback_entities.items() 
                                              if k not in extracted_entities})
 
+            except json.JSONDecodeError as json_error:
+                print(f"--- DEBUG: JSON parsing error: {json_error}")
+                print(f"Raw response: {content if 'content' in locals() else 'No content'}")
+                detected_intent, extracted_entities = self._fallback_processing(text)
+                
             except Exception as llm_error:
                 self.llm_failed_count += 1
-                print(f"LLM Error (attempt {self.llm_failed_count}): {llm_error}")
+                print(f"--- DEBUG: Error during LLM processing: {llm_error}")
                 
-                if "429" in str(llm_error) or "Rate limit" in str(llm_error):
+                if "429" in str(llm_error) or "rate_limit" in str(llm_error).lower():
                     print(f"Rate limited. Waiting {self.retry_delay}s before fallback...")
                     time.sleep(self.retry_delay)
                 
                 if self.llm_failed_count >= self.max_llm_failures:
-                    print(f"Temporarily disabling LLM after {self.max_llm_failures} failures")
+                    print(f"Temporarily disabling LLM after {self.llm_failed_count} failures")
                 
                 print("Using fallback processing...")
                 detected_intent, extracted_entities = self._fallback_processing(text)
 
         else:
             reason = "disabled due to failures" if self.llm_failed_count >= self.max_llm_failures else "not initialized"
-            print(f"Processing with fallback ({reason})")
+            print(f"--- DEBUG: Processing with fallback ({reason}) ---")
             detected_intent, extracted_entities = self._fallback_processing(text)
 
         return {
             "intent": detected_intent,
             "entities": extracted_entities,
-            "processing_method": "llm" if self.nlp and self.llm_failed_count < self.max_llm_failures else "fallback"
+            "processing_method": "llm" if self.client and self.llm_failed_count < self.max_llm_failures else "fallback"
         }
     
     def _fallback_processing(self, text: str) -> tuple:
-        """Enhanced fallback processing using regex and keyword matching"""
+        """Enhanced fallback processing with context awareness"""
         detected_intent = "Unknown"
         extracted_entities = {}
         normalized_text = text.lower()
         
-        # Intent Classification Fallback - More comprehensive
+        # Enhanced intent keywords with confirmation handling
         intent_keywords = {
-            "RenovatePolicy": ["renovar", "renovacion", "renovar poliza", "renovacion de poliza", 
-                              "renovarla", "renovarlo", "renovar garantia", "renovacion de garantia",
-                              "renew", "renewal", "extend policy"],
-            "CancelRenovation": ["cancelar", "cancelarla", "cancelar renovacion", "cancelar proceso",
-                               "cancel", "stop", "terminate"],
-            "Greeting": ["hola", "que tal", "buenos dias", "buenas tardes", "hello", "hi", "hey", "good morning"],
+            "ConfirmRenovation": ["sí", "si", "confirmo", "confirmó", "proceda", "proceder", "adelante", "de acuerdo", "está bien", "ok", "yes", "confirm", "proceed"],
+            "RenovatePolicy": ["renovar", "renovacion", "renovación", "renovar poliza", "renovar póliza", "renovarla", "renovarlo", "renew", "renewal", "extend policy"],
+            "CancelRenovation": ["cancelar", "cancelarla", "cancelar renovacion", "cancelar renovación", "cancelar proceso", "cancel", "stop", "terminate", "no quiero"],
+            "Greeting": ["hola", "que tal", "qué tal", "buenos dias", "buenos días", "buenas tardes", "hello", "hi", "hey", "good morning"],
             "RequestSupport": ["ayuda", "soporte", "asistencia", "help", "support", "assistance", "problema"],
-            "GetQuote": ["precio", "cotizar", "cotizacion", "costo", "quote", "price", "cost", "estimate"],
-            "QueryPolicyDetails": ["poliza", "detalles", "informacion", "consultar", "policy", "details", "information", "status"]
+            "GetQuote": ["precio", "cotizar", "cotizacion", "cotización", "costo", "quote", "price", "cost", "estimate"],
+            "QueryPolicyDetails": ["poliza", "póliza", "detalles", "informacion", "información", "consultar", "policy", "details", "information", "status"]
         }
         
-        # Check for intent keywords
+        # Find intent with priority for confirmation words
         for intent, keywords in intent_keywords.items():
             if any(keyword in normalized_text for keyword in keywords):
                 detected_intent = intent
                 break
 
-        # Enhanced Entity Extraction with better patterns
+        # Enhanced entity extraction patterns
         patterns = {
             "policy_number": r'\b[A-Z]{2,4}\d{5,8}\b',
             "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
@@ -224,7 +169,6 @@ Entities:"""
             "customer_id": r'\b(?:ID|id|Id)[-:\s]*([A-Z0-9]{4,12})\b'
         }
         
-        # Apply regex patterns
         for entity_type, pattern in patterns.items():
             flags = re.IGNORECASE if entity_type not in ["policy_number", "vin"] else 0
             search_text = text.upper() if entity_type in ["policy_number", "vin"] else text
@@ -232,43 +176,39 @@ Entities:"""
             if match:
                 extracted_entities[entity_type] = match.group(1) if entity_type == "customer_id" else match.group(0)
         
-        # Enhanced car makes detection
+        # Enhanced car make detection
         car_makes = {
-            "honda": ["honda"],
-            "toyota": ["toyota"],
-            "ford": ["ford"],
-            "volkswagen": ["vw", "volkswagen"],
-            "audi": ["audi"],
-            "nissan": ["nissan"],
-            "chevrolet": ["chevrolet", "chevy"],
-            "bmw": ["bmw"],
-            "mercedes": ["mercedes", "mercedes-benz", "benz"],
-            "hyundai": ["hyundai"],
-            "kia": ["kia"],
-            "mazda": ["mazda"],
-            "subaru": ["subaru"],
-            "jeep": ["jeep"]
+            "Volkswagen": ["vw", "volkswagen"], "Honda": ["honda"], "Toyota": ["toyota"], 
+            "Ford": ["ford"], "Audi": ["audi"], "Nissan": ["nissan"],
+            "Chevrolet": ["chevrolet", "chevy"], "BMW": ["bmw"],
+            "Mercedes": ["mercedes", "mercedes-benz", "benz"], "Hyundai": ["hyundai"],
+            "Kia": ["kia"], "Mazda": ["mazda"], "Subaru": ["subaru"], "Jeep": ["jeep"]
         }
         
         for make, variants in car_makes.items():
             if any(variant in normalized_text for variant in variants):
-                extracted_entities["vehicle_make"] = make.capitalize()
+                extracted_entities["vehicle_make"] = make
                 break
         
-        # Enhanced model detection (basic patterns)
-        common_models = ["civic", "accord", "corolla", "camry", "focus", "fiesta", "sentra", "altima",
-                         "vento", "versa", "cr-v", "rav4", "f-150", "silverado", "jetta", "golf"]
-        for model in common_models:
-            if model in normalized_text:
-                extracted_entities["vehicle_model"] = model.capitalize()
+        # Enhanced model detection
+        common_models = {
+            "vento": "Vento", "civic": "Civic", "accord": "Accord", "corolla": "Corolla", 
+            "camry": "Camry", "focus": "Focus", "fiesta": "Fiesta", "sentra": "Sentra", 
+            "altima": "Altima", "versa": "Versa", "jetta": "Jetta", "golf": "Golf"
+        }
+        
+        for model_key, model_name in common_models.items():
+            if model_key in normalized_text:
+                extracted_entities["vehicle_model"] = model_name
                 break
         
-        # Enhanced name extraction
+        # Enhanced name extraction with Spanish support
         name_patterns = [
             (r"my name is ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
             (r"me llamo ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
             (r"soy ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
-            (r"nombre[:\s]+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1)
+            (r"nombre[:\s]+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
+            (r"mi nombre es ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1)
         ]
         
         for pattern, group in name_patterns:
@@ -285,13 +225,13 @@ Entities:"""
     def reset_llm_failures(self):
         """Reset LLM failure count to re-enable LLM processing"""
         self.llm_failed_count = 0
-        print("🔄 LLM failure count reset. LLM processing re-enabled.")
+        print("LLM failure count reset. LLM processing re-enabled.")
     
     def get_status(self):
         """Get current pipeline status"""
         return {
-            "llm_enabled": self.nlp is not None,
+            "llm_enabled": self.client is not None,
             "llm_failures": self.llm_failed_count,
             "llm_temp_disabled": self.llm_failed_count >= self.max_llm_failures,
-            "processing_mode": "llm" if self.nlp and self.llm_failed_count < self.max_llm_failures else "fallback"
+            "processing_mode": "llm" if self.client and self.llm_failed_count < self.max_llm_failures else "fallback"
         }
