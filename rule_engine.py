@@ -78,5 +78,17 @@ class RuleEngine:
                                        "Cobertura de 24 meses: $14,900.00\n"
                                        "Cobertura de 36 meses: $21,900.00\n"
                                        "Cobertura de 48 meses: $28,900.00"
-            }           
+            }  
+         # Rule 3: Answer "Dónde reportar para hacer válida la garantía?" (QueryPolicyDetails / RequestSupport)
+        # This is a direct answer from the FAQs.
+        if state.get("current_intent") == "QueryPolicyDetails" and \
+           any(keyword in state.get("conversation_summary", "").lower() for keyword in ["reportar", "valida", "garantia"]):
+           # Using conversation_summary for context if intent is general
+            print("Rule Fired: Provide Warranty Claim Contact Info")
+            return {
+                "action_type": "provide_info",
+                "message": "Para hacer válida su garantía, puede reportar a través de nuestro call center: 800 garanti (4272684) o WhatsApp 4432441212.",
+                "message_to_customer": "Para hacer válida su garantía, puede reportar a través de nuestro call center: 800 garanti (4272684) o WhatsApp 4432441212."
+            }
+                 
     
