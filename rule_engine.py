@@ -24,23 +24,25 @@ class RuleEngine:
 
         # --- HIGH PRIORITY RULES (CRITICAL ACTIONS & IMMEDIATE RESPONSES) ---
 
-        # Rule 1: Immediate Notification for Renovation Interest (HIGHEST PRIORITY)
+        # Rule 1: Notify Human Renovation Lead
         # This rule fires as soon as the intent is detected and we have basic contact info.
-        # It's for hot leads that need human attention quickly.
+        # FIXED: Check extracted entities directly instead of state flags
         if state.get("current_intent") == "RenovatePolicy" and \
-           state.get("contact_info_provided", False) and \
+           state.get("entities", {}).get("POLICY_NUMBER") and \
+           (state.get("entities", {}).get("CUSTOMER_NAME") or state.get("entities", {}).get("EMAIL")) and \
            not state.get("renovation_lead_notified", False): # Ensure it only fires once
             
             # Extract all relevant data for the email notification
-            customer_name = state["entities"].get("customer_name", "Usuario Desconocido")
-            policy_number = state["entities"].get("policy_number", "No Proporcionada")
-            email = state["entities"].get("email", "No Proporcionado")
-            phone_number = state["entities"].get("phone_number", state["session_id"]) # Use WhatsApp ID if no phone provided
-            vin = state["entities"].get("vin", "No Proporcionado")
-            vehicle_make = state["entities"].get("vehicle_make", "No Proporcionado")
-            vehicle_model = state["entities"].get("vehicle_model", "No Proporcionado")
-            vehicle_year = state["entities"].get("vehicle_year", "No Proporcionado")
-            conversation_summary = state.get("conversation_summary", "No hay resumen disponible.") # Summary from MemoryManager
+            entities = state.get("entities", {})
+            customer_name = entities.get("CUSTOMER_NAME", "Usuario Desconocido")
+            policy_number = entities.get("POLICY_NUMBER", "No Proporcionada")
+            email = entities.get("EMAIL", "No Proporcionado")
+            phone_number = entities.get("PHONE_NUMBER", state.get("session_id", "No Proporcionado"))
+            vin = entities.get("VIN", "No Proporcionado")
+            vehicle_make = entities.get("VEHICLE_MAKE", "No Proporcionado")
+            vehicle_model = entities.get("VEHICLE_MODEL", "No Proporcionado")
+            vehicle_year = entities.get("VEHICLE_YEAR", "No Proporcionado")
+            conversation_summary = state.get("conversation_summary", "No hay resumen disponible.")
 
             # Update the state to mark that the lead has been notified
             state["renovation_lead_notified"] = True # This flag will be saved by DecisionEngine
@@ -115,9 +117,9 @@ class RuleEngine:
         # --- CORE RENOVATION FLOW RULES (GUIDING THE CONVERSATION) ---
 
         # Rule 6: Ask for Policy Number (if RenovatePolicy intent and no policy number)
-        # This guides the user to provide necessary information for renovation.
+        # FIXED: Check entities directly instead of state flags
         if state.get("current_intent") == "RenovatePolicy" and \
-           not state.get("policy_number_provided", False):
+           not state.get("entities", {}).get("POLICY_NUMBER"):
             print("Rule Fired: Ask for Policy Number")
             return {
                 "action_type": "ask_for_info",
@@ -125,23 +127,52 @@ class RuleEngine:
                 "message_to_customer": "Para renovar su póliza, por favor, proporcione su número de póliza."
             }
 
-        # Rule 7: Ask for Vehicle Details (if policy number provided, but no vehicle details)
-        # This guides the user to provide necessary information for renovation.
+        # Rule 7: Ask for Vehicle Details (if RenovatePolicy and policy number provided, but no vehicle details)
+        # FIXED: Check entities directly instead of state flags
         if state.get("current_intent") == "RenovatePolicy" and \
-           state.get("policy_number_provided", False) and \
-           not state.get("vehicle_details_provided", False):
+           state.get("entities", {}).get("POLICY_NUMBER") and \
+           not (state.get("entities", {}).get("VEHICLE_MAKE") and 
+                state.get("entities", {}).get("VEHICLE_MODEL")):
             print("Rule Fired: Ask for Vehicle Details")
             return {
                 "action_type": "ask_for_info",
                 "message": "¡Excelente! Ahora, ¿podría indicarme la marca, modelo y año de su vehículo?",
                 "message_to_customer": "¡Excelente! Ahora, ¿podría indicarme la marca, modelo y año de su vehículo?"
             }
+
+        # NEW Rule 7b: Ask for Vehicle Details (if QueryPolicyDetails and policy number provided, but no vehicle details)
+        # This handles the case when user just provides policy number and NLP classifies as QueryPolicyDetails
+        if state.get("current_intent") == "QueryPolicyDetails" and \
+           state.get("entities", {}).get("POLICY_NUMBER") and \
+           not (state.get("entities", {}).get("VEHICLE_MAKE") and 
+                state.get("entities", {}).get("VEHICLE_MODEL")) and \
+           not any(keyword in state.get("conversation_summary", "").lower() for keyword in ["reportar", "valida", "garantia"]):
+            print("Rule Fired: Ask for Vehicle Details (QueryPolicyDetails flow)")
+            return {
+                "action_type": "ask_for_info",
+                "message": "Gracias por el número de póliza. Para continuar con su renovación, ¿podría indicarme la marca, modelo y año de su vehículo?",
+                "message_to_customer": "Gracias por el número de póliza. Para continuar con su renovación, ¿podría indicarme la marca, modelo y año de su vehículo?"
+            }
+        
+        # NEW Rule 7c: Handle Vehicle Info Provided - THIS IS THE MISSING RULE FOR TEST 4
+        # This rule handles when user provides vehicle information (regardless of how intent is classified)
+        if self._has_vehicle_info_in_entities(state.get("entities", {})) and \
+           self._has_policy_number_in_state(state) and \
+           not state.get("quote_provided", False):
+            state["quote_provided"] = True # Mark quote as provided
+            print("Rule Fired: Generate Quote After Vehicle Info Provided")
+            return {
+                "action_type": "generate_quote",
+                "message": "Perfecto. Con la información de su póliza y vehículo, le generaré una cotización para la renovación.",
+                "message_to_customer": "Perfecto. Con la información de su póliza y vehículo, le generaré una cotización para la renovación."
+            }
         
         # Rule 8: Ready for Quote (if all initial info collected and not yet quoted)
-        # This is a transition rule to the next stage of the renovation process.
-        if state.get("current_intent") == "RenovatePolicy" and \
-           state.get("policy_number_provided", False) and \
-           state.get("vehicle_details_provided", False) and \
+        # FIXED: Check entities directly instead of state flags and handle both intents
+        if (state.get("current_intent") in ["RenovatePolicy", "QueryPolicyDetails"]) and \
+           state.get("entities", {}).get("POLICY_NUMBER") and \
+           state.get("entities", {}).get("VEHICLE_MAKE") and \
+           state.get("entities", {}).get("VEHICLE_MODEL") and \
            not state.get("quote_provided", False): # Ensure quote hasn't been provided yet
             # In a real scenario, you'd trigger an external quote generation API here.
             # For MVP, we'll simulate it.
@@ -176,3 +207,31 @@ class RuleEngine:
         # If no rule fires, return None, so the DecisionEngine can fall back to PolicyModule
         print("No rule fired. Deferring to Policy Module.")
         return None
+
+    def _has_vehicle_info_in_entities(self, entities: dict) -> bool:
+        """Check if vehicle information is present in entities (handles both formats)"""
+        # Check uppercase format (from LLM)
+        has_uppercase = ('VEHICLE_MAKE' in entities and 'VEHICLE_MODEL' in entities)
+        
+        # Check lowercase format (from fallback)
+        has_lowercase = ('vehicle_make' in entities and 'vehicle_model' in entities)
+        
+        return has_uppercase or has_lowercase
+
+    def _has_policy_number_in_state(self, state: dict) -> bool:
+        """Check if policy number exists anywhere in the state"""
+        entities = state.get("entities", {})
+        
+        # Check in current entities (both formats)
+        if 'POLICY_NUMBER' in entities or 'policy_number' in entities:
+            return True
+            
+        # Check if it was provided in previous conversation turns
+        # (In case it was in a previous message and not carried over to current entities)
+        conversation_summary = state.get("conversation_summary", "").upper()
+        policy_pattern = r'\b[A-Z]{2,4}\d{5,8}\b'
+        import re
+        if re.search(policy_pattern, conversation_summary):
+            return True
+            
+        return False

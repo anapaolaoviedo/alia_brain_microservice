@@ -1,4 +1,4 @@
-# nlp_pipeline.py
+# nlp_pipeline.py - Updated version with vehicle info intent
 import re
 import spacy
 import os
@@ -51,7 +51,7 @@ class NlpPipeline:
         if self.client and self.llm_failed_count < self.max_llm_failures:
             print(f"\n--- DEBUG: Processing with OpenAI LLM for text: '{text.strip()}' ---")
             try:
-                # Direct OpenAI API call
+                # Direct OpenAI API call with improved system prompt
                 response = self.client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
@@ -59,14 +59,30 @@ class NlpPipeline:
                             "role": "system",
                             "content": """You are an AI assistant for a car insurance company. 
                             
-                            Classify the user's intent into ONE of: RenovatePolicy, GetQuote, QueryPolicyDetails, CancelRenovation, Greeting, RequestSupport, ConfirmRenovation, Unknown.
+                            Classify the user's intent into ONE of: 
+                            - RenovatePolicy: User wants to renew their insurance policy
+                            - GetQuote: User asks for price/quote
+                            - QueryPolicyDetails: User provides policy number or asks about policy
+                            - ProvideVehicleInfo: User provides vehicle make, model, year (like "Honda Civic 2020", "es un VW Vento 2015")
+                            - ProvideContactInfo: User provides name, email, phone
+                            - CancelRenovation: User wants to cancel
+                            - Greeting: Hello, good morning, etc.
+                            - RequestSupport: User asks for help
+                            - ConfirmRenovation: User confirms with "sí", "confirmo", "proceda", "adelante"
+                            - Unknown: Cannot determine intent
                             
                             Extract entities for: POLICY_NUMBER, VEHICLE_MAKE, VEHICLE_MODEL, VEHICLE_YEAR, CUSTOMER_NAME, EMAIL, PHONE_NUMBER, VIN.
                             
                             IMPORTANT CONTEXT RULES:
+                            - If user says "es un [brand] [model] [year]" = ProvideVehicleInfo
                             - If user says "sí", "confirmo", "proceda", "adelante" after discussing renovation = ConfirmRenovation
                             - "renovar", "renovación" = RenovatePolicy
                             - Always preserve and extract policy numbers, names, emails, vehicle info
+                            
+                            Examples:
+                            - "Es un auto Honda Civic 2020" → ProvideVehicleInfo
+                            - "Mi carro es un VW Vento 2015" → ProvideVehicleInfo
+                            - "Tengo un Toyota Corolla del 2018" → ProvideVehicleInfo
                             
                             Respond ONLY with valid JSON:
                             {"intent": "IntentName", "entities": {"entity_type": "value"}}"""
@@ -103,13 +119,16 @@ class NlpPipeline:
                     fallback_intent, fallback_entities = self._fallback_processing(text)
                     if detected_intent == "Unknown":
                         detected_intent = fallback_intent
-                    extracted_entities.update({k: v for k, v in fallback_entities.items() 
-                                             if k not in extracted_entities})
+                    # Normalize and merge entities
+                    normalized_fallback = self._normalize_entities(fallback_entities)
+                    normalized_extracted = self._normalize_entities(extracted_entities)
+                    extracted_entities = {**normalized_fallback, **normalized_extracted}
 
             except json.JSONDecodeError as json_error:
                 print(f"--- DEBUG: JSON parsing error: {json_error}")
                 print(f"Raw response: {content if 'content' in locals() else 'No content'}")
                 detected_intent, extracted_entities = self._fallback_processing(text)
+                extracted_entities = self._normalize_entities(extracted_entities)
                 
             except Exception as llm_error:
                 self.llm_failed_count += 1
@@ -124,11 +143,13 @@ class NlpPipeline:
                 
                 print("Using fallback processing...")
                 detected_intent, extracted_entities = self._fallback_processing(text)
+                extracted_entities = self._normalize_entities(extracted_entities)
 
         else:
             reason = "disabled due to failures" if self.llm_failed_count >= self.max_llm_failures else "not initialized"
             print(f"--- DEBUG: Processing with fallback ({reason}) ---")
             detected_intent, extracted_entities = self._fallback_processing(text)
+            extracted_entities = self._normalize_entities(extracted_entities)
 
         return {
             "intent": detected_intent,
@@ -136,13 +157,35 @@ class NlpPipeline:
             "processing_method": "llm" if self.client and self.llm_failed_count < self.max_llm_failures else "fallback"
         }
     
+    def _normalize_entities(self, entities: dict) -> dict:
+        """Normalize entity keys to consistent format"""
+        normalized = {}
+        
+        entity_mappings = {
+            'vehicle_make': 'VEHICLE_MAKE',
+            'vehicle_model': 'VEHICLE_MODEL', 
+            'vehicle_year': 'VEHICLE_YEAR',
+            'customer_name': 'CUSTOMER_NAME',
+            'policy_number': 'POLICY_NUMBER',
+            'email': 'EMAIL',
+            'phone_number': 'PHONE_NUMBER',
+            'vin': 'VIN'
+        }
+        
+        for key, value in entities.items():
+            # Use mapping if exists, otherwise keep original key
+            standard_key = entity_mappings.get(key.lower(), key.upper())
+            normalized[standard_key] = value
+            
+        return normalized
+    
     def _fallback_processing(self, text: str) -> tuple:
         """Enhanced fallback processing with context awareness"""
         detected_intent = "Unknown"
         extracted_entities = {}
         normalized_text = text.lower()
         
-        # Enhanced intent keywords with confirmation handling
+        # Enhanced intent keywords with vehicle info detection
         intent_keywords = {
             "ConfirmRenovation": ["sí", "si", "confirmo", "confirmó", "proceda", "proceder", "adelante", "de acuerdo", "está bien", "ok", "yes", "confirm", "proceed"],
             "RenovatePolicy": ["renovar", "renovacion", "renovación", "renovar poliza", "renovar póliza", "renovarla", "renovarlo", "renew", "renewal", "extend policy"],
@@ -150,7 +193,8 @@ class NlpPipeline:
             "Greeting": ["hola", "que tal", "qué tal", "buenos dias", "buenos días", "buenas tardes", "hello", "hi", "hey", "good morning"],
             "RequestSupport": ["ayuda", "soporte", "asistencia", "help", "support", "assistance", "problema"],
             "GetQuote": ["precio", "cotizar", "cotizacion", "cotización", "costo", "quote", "price", "cost", "estimate"],
-            "QueryPolicyDetails": ["poliza", "póliza", "detalles", "informacion", "información", "consultar", "policy", "details", "information", "status"]
+            "QueryPolicyDetails": ["poliza", "póliza", "detalles", "informacion", "información", "consultar", "policy", "details", "information", "status"],
+            "ProvideVehicleInfo": ["es un", "tengo un", "mi carro", "mi auto", "mi vehículo", "it's a", "i have a", "my car"]
         }
         
         # Find intent with priority for confirmation words
