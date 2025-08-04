@@ -3,26 +3,24 @@ from typing import Optional # Import Optional for type hinting
 
 class RuleEngine:
     '''
-    Placeholder for BRAIN's rule-based policy component (pi_R).
-    In future iterations, this module will contain explicit rules and guardrails.
+    BRAIN's rule-based policy component (pi_R).
+    This module contains explicit rules and guardrails for decision-making.
+    Rules are evaluated in order of priority.
     '''
     def __init__(self):
         print("Rule Engine initialized: Ready for explicit rules.")
 
-    def evaluate_rules(self, state: dict) -> Optional[dict]: # CORRECTED: Use Optional[dict]
+    def evaluate_rules(self, state: dict) -> Optional[dict]:
         """
         Evaluates a set of predefined rules based on the current state.
-        For now, it always returns None, deferring to the PolicyModule.
+        Rules are ordered by priority, with the first matching rule's action being returned.
 
         Args:
-        state (dict): The current state of the conversation.
+            state (dict): The current state of the conversation (from MemoryManager).
 
         Returns:
-        Optional[dict]: An action dictionary if a rule fires, otherwise None.
+            Optional[dict]: An action dictionary if a rule fires, otherwise None.
         """
-        # For today, we'll make this always return None so the DecisionEngine
-        # falls back to the PolicyModule. SOOOONNN ->>>
-        return None
 
         # --- HIGH PRIORITY RULES (CRITICAL ACTIONS & IMMEDIATE RESPONSES) ---
 
@@ -62,7 +60,8 @@ class RuleEngine:
                     "conversation_summary": conversation_summary
                 }
             }
-         # Rule 2: Answer "Cuánto cuesta renovar la garantía?" (GetQuote intent)
+
+        # Rule 2: Answer "Cuánto cuesta renovar la garantía?" (GetQuote intent)
         # This is a direct answer from the FAQs.
         if state.get("current_intent") == "GetQuote":
             print("Rule Fired: Provide Renovation Cost Info")
@@ -78,8 +77,9 @@ class RuleEngine:
                                        "Cobertura de 24 meses: $14,900.00\n"
                                        "Cobertura de 36 meses: $21,900.00\n"
                                        "Cobertura de 48 meses: $28,900.00"
-            }  
-         # Rule 3: Answer "Dónde reportar para hacer válida la garantía?" (QueryPolicyDetails / RequestSupport)
+            }
+        
+        # Rule 3: Answer "Dónde reportar para hacer válida la garantía?" (QueryPolicyDetails / RequestSupport)
         # This is a direct answer from the FAQs.
         if state.get("current_intent") == "QueryPolicyDetails" and \
            any(keyword in state.get("conversation_summary", "").lower() for keyword in ["reportar", "valida", "garantia"]):
@@ -90,5 +90,89 @@ class RuleEngine:
                 "message": "Para hacer válida su garantía, puede reportar a través de nuestro call center: 800 garanti (4272684) o WhatsApp 4432441212.",
                 "message_to_customer": "Para hacer válida su garantía, puede reportar a través de nuestro call center: 800 garanti (4272684) o WhatsApp 4432441212."
             }
-                 
-    
+
+        # Rule 4: Answer "Puedo renovar si mi garantía ya expiró?" (RenovatePolicy / QueryExpiredRenewal)
+        # This is a direct answer from the FAQs.
+        if state.get("current_intent") == "RenovatePolicy" and \
+           any(keyword in state.get("conversation_summary", "").lower() for keyword in ["expiró", "vencida", "pasada"]):
+            print("Rule Fired: Provide Expired Renewal Policy")
+            return {
+                "action_type": "provide_info",
+                "message": "Sí, puede renovar si su garantía ya expiró, pero no debe exceder de 30 días posterior al fin de vigencia y haber cumplido con los servicios en tiempo y forma.",
+                "message_to_customer": "Sí, puede renovar si su garantía ya expiró, pero no debe exceder de 30 días posterior al fin de vigencia y haber cumplido con los servicios en tiempo y forma."
+            }
+        
+        # Rule 5: Answer "Formas de pago o promociones?" (GetQuote / QueryPaymentOptions)
+        if state.get("current_intent") == "GetQuote" and \
+           any(keyword in state.get("conversation_summary", "").lower() for keyword in ["pago", "promociones", "msi"]):
+            print("Rule Fired: Provide Payment Options")
+            return {
+                "action_type": "provide_info",
+                "message": "El pago se realiza a través de transferencia o tarjeta. Actualmente contamos con la promoción de hasta 12 Meses Sin Intereses (MSI).",
+                "message_to_customer": "El pago se realiza a través de transferencia o tarjeta. Actualmente contamos con la promoción de hasta 12 Meses Sin Intereses (MSI)."
+            }
+
+        # --- CORE RENOVATION FLOW RULES (GUIDING THE CONVERSATION) ---
+
+        # Rule 6: Ask for Policy Number (if RenovatePolicy intent and no policy number)
+        # This guides the user to provide necessary information for renovation.
+        if state.get("current_intent") == "RenovatePolicy" and \
+           not state.get("policy_number_provided", False):
+            print("Rule Fired: Ask for Policy Number")
+            return {
+                "action_type": "ask_for_info",
+                "message": "Para renovar su póliza, por favor, proporcione su número de póliza.",
+                "message_to_customer": "Para renovar su póliza, por favor, proporcione su número de póliza."
+            }
+
+        # Rule 7: Ask for Vehicle Details (if policy number provided, but no vehicle details)
+        # This guides the user to provide necessary information for renovation.
+        if state.get("current_intent") == "RenovatePolicy" and \
+           state.get("policy_number_provided", False) and \
+           not state.get("vehicle_details_provided", False):
+            print("Rule Fired: Ask for Vehicle Details")
+            return {
+                "action_type": "ask_for_info",
+                "message": "¡Excelente! Ahora, ¿podría indicarme la marca, modelo y año de su vehículo?",
+                "message_to_customer": "¡Excelente! Ahora, ¿podría indicarme la marca, modelo y año de su vehículo?"
+            }
+        
+        # Rule 8: Ready for Quote (if all initial info collected and not yet quoted)
+        # This is a transition rule to the next stage of the renovation process.
+        if state.get("current_intent") == "RenovatePolicy" and \
+           state.get("policy_number_provided", False) and \
+           state.get("vehicle_details_provided", False) and \
+           not state.get("quote_provided", False): # Ensure quote hasn't been provided yet
+            # In a real scenario, you'd trigger an external quote generation API here.
+            # For MVP, we'll simulate it.
+            state["quote_provided"] = True # Mark quote as provided in state
+            print("Rule Fired: Ready for Quote Generation")
+            return {
+                "action_type": "generate_quote",
+                "message": "¡Perfecto! Con esta información, puedo generar una cotización para su renovación. Por favor, espere un momento.",
+                "message_to_customer": "¡Perfecto! Con esta información, puedo generar una cotización para su renovación. Por favor, espere un momento."
+            }
+
+        # --- GENERAL FALLBACK RULES (LOWEST PRIORITY) ---
+
+        # Rule 9: General Greeting Response
+        if state.get("current_intent") == "Greeting":
+            print("Rule Fired: General Greeting")
+            return {
+                "action_type": "greet",
+                "message": "¡Hola! Soy tu asistente de GarantiPLUS. ¿En qué puedo ayudarte hoy con la renovación de tu garantía extendida?",
+                "message_to_customer": "¡Hola! Soy tu asistente de GarantiPLUS. ¿En qué puedo ayudarte hoy con la renovación de tu garantía extendida?"
+            }
+
+        # Rule 10: Request Support Response
+        if state.get("current_intent") == "RequestSupport":
+            print("Rule Fired: Request Support")
+            return {
+                "action_type": "escalate_to_human",
+                "message": "Entiendo que necesitas ayuda. Por favor, comunícate con nuestro centro de atención al cliente al 800 garanti (4272684) o por WhatsApp al 4432441212 para asistencia personalizada.",
+                "message_to_customer": "Entiendo que necesitas ayuda. Por favor, comunícate con nuestro centro de atención al cliente al 800 garanti (4272684) o por WhatsApp al 4432441212 para asistencia personalizada."
+            }
+
+        # If no rule fires, return None, so the DecisionEngine can fall back to PolicyModule
+        print("No rule fired. Deferring to Policy Module.")
+        return None
