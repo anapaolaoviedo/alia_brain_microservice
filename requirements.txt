@@ -3,6 +3,7 @@ uvicorn
 pydantic
 redis
 spacy
-scikit-learn
-spacy-llm
 python-dotenv
+psycopg2-binary
+openai
+python-multipart

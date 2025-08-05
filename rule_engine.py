@@ -1,38 +1,96 @@
-# rule_engine.py
+"""
+BRAIN Rule Engine - Strategic Decision-Making System
+==================================================
+
+This module implements BRAIN's "Strategic Decision-Making" capability through explicit
+business rules and guardrails. It acts as the policy enforcement layer (π_R) that
+ensures critical business actions are taken accurately and consistently.
+
+Rule Architecture:
+1. HIGH PRIORITY: Critical actions and immediate responses (notifications, escalations)
+2. MEDIUM PRIORITY: Core conversation flow rules (information gathering)
+3. LOW PRIORITY: General fallback responses (greetings, support)
+
+Rules are evaluated in priority order, with the first matching rule's action being executed.
+This ensures deterministic behavior for important business scenarios while allowing
+flexibility for edge cases.
+
+Key Business Rules:
+- Automatic human agent notification when renovation intent + contact info detected
+- FAQ responses for common questions (pricing, claims, payments)
+- Guided conversation flow for policy renewals (collect policy #, vehicle info, generate quote)
+- Fallback responses for general inquiries and support requests
+"""
+
 from typing import Optional # Import Optional for type hinting
 
 class RuleEngine:
     '''
-    BRAIN's rule-based policy component (pi_R).
-    This module contains explicit rules and guardrails for decision-making.
-    Rules are evaluated in order of priority.
+    BRAIN's rule-based policy component (π_R).
+    
+    This module contains explicit rules and guardrails for decision-making in the
+    insurance domain. Rules encode business logic, compliance requirements, and
+    best practices for customer interactions.
+    
+    Rules are evaluated in strict priority order to ensure consistent and predictable
+    behavior for critical business scenarios.
     '''
     def __init__(self):
+        """
+        Initialize the rule engine with predefined business rules.
+        
+        Rules are hard-coded rather than loaded from external files to ensure
+        reliability and prevent accidental rule modifications that could impact
+        business operations.
+        """
         print("Rule Engine initialized: Ready for explicit rules.")
 
     def evaluate_rules(self, state: dict) -> Optional[dict]:
         """
-        Evaluates a set of predefined rules based on the current state.
-        Rules are ordered by priority, with the first matching rule's action being returned.
+        Evaluate predefined business rules based on the current conversation state.
+        
+        This method implements BRAIN's strategic decision-making by checking the current
+        conversation context against explicit business rules. Rules are ordered by
+        business priority, with critical actions (like human notifications) taking
+        precedence over informational responses.
+        
+        Processing Logic:
+        1. Extract current intent and entities from conversation state
+        2. Check rules in priority order (high → medium → low)
+        3. Return action for first matching rule
+        4. Return None if no rules match (triggers policy module fallback)
 
         Args:
-            state (dict): The current state of the conversation (from MemoryManager).
+            state (dict): Complete conversation state from MemoryManager including:
+                - current_intent: What the customer wants to accomplish
+                - entities: Extracted information (policy #, vehicle details, contact info)
+                - conversation_summary: Running summary of the conversation
+                - Various flags tracking conversation progress
 
         Returns:
-            Optional[dict]: An action dictionary if a rule fires, otherwise None.
+            Optional[dict]: Action dictionary if a rule fires, otherwise None.
+                Action structure: {
+                    "action_type": "category_of_action",
+                    "message_to_customer": "response_text",
+                    "additional_data": {...}  # Action-specific metadata
+                }
         """
 
-        # --- HIGH PRIORITY RULES (CRITICAL ACTIONS & IMMEDIATE RESPONSES) ---
+        # ========================================================================
+        # HIGH PRIORITY RULES - CRITICAL ACTIONS & IMMEDIATE RESPONSES
+        # ========================================================================
+        # These rules handle business-critical scenarios that require immediate
+        # action and cannot be delayed or missed.
 
-        # Rule 1: Notify Human Renovation Lead
-        # This rule fires as soon as the intent is detected and we have basic contact info.
-        # FIXED: Check extracted entities directly instead of state flags
+        # RULE 1: HUMAN AGENT NOTIFICATION - Business Critical
+        # Triggers when we have sufficient information to notify a human sales agent
+        # This is the most important rule as it directly impacts revenue generation
         if state.get("current_intent") == "RenovatePolicy" and \
            state.get("entities", {}).get("POLICY_NUMBER") and \
            (state.get("entities", {}).get("CUSTOMER_NAME") or state.get("entities", {}).get("EMAIL")) and \
-           not state.get("renovation_lead_notified", False): # Ensure it only fires once
+           not state.get("renovation_lead_notified", False): # Ensure it only fires once per conversation
             
-            # Extract all relevant data for the email notification
+            # Extract all available customer data for the sales team
             entities = state.get("entities", {})
             customer_name = entities.get("CUSTOMER_NAME", "Usuario Desconocido")
             policy_number = entities.get("POLICY_NUMBER", "No Proporcionada")
@@ -44,14 +102,14 @@ class RuleEngine:
             vehicle_year = entities.get("VEHICLE_YEAR", "No Proporcionado")
             conversation_summary = state.get("conversation_summary", "No hay resumen disponible.")
 
-            # Update the state to mark that the lead has been notified
+            # Mark notification as sent to prevent duplicate notifications
             state["renovation_lead_notified"] = True # This flag will be saved by DecisionEngine
 
             print(f"Rule Fired: Notify Human Renovation Lead for {customer_name}")
             return {
                 "action_type": "notify_human_renovation_lead",
                 "message_to_customer": f"Gracias {customer_name}. Hemos recibido su interés en renovar. Un agente se pondrá en contacto con usted en breve para ayudarle.",
-                "notification_data": { # This data will be sent to Make.com for the email
+                "notification_data": { # This data will be sent to Make.com for CRM integration
                     "customer_name": customer_name,
                     "policy_number": policy_number,
                     "email": email,
@@ -63,8 +121,9 @@ class RuleEngine:
                 }
             }
 
-        # Rule 2: Answer "Cuánto cuesta renovar la garantía?" (GetQuote intent)
-        # This is a direct answer from the FAQs.
+        # RULE 2: PRICING INFORMATION - Direct FAQ Response
+        # Provides immediate pricing information when customers ask about costs
+        # This reduces sales friction by providing transparent pricing upfront
         if state.get("current_intent") == "GetQuote":
             print("Rule Fired: Provide Renovation Cost Info")
             return {
@@ -81,11 +140,11 @@ class RuleEngine:
                                        "Cobertura de 48 meses: $28,900.00"
             }
         
-        # Rule 3: Answer "Dónde reportar para hacer válida la garantía?" (QueryPolicyDetails / RequestSupport)
-        # This is a direct answer from the FAQs.
+        # RULE 3: CLAIMS REPORTING INFORMATION - Customer Service Critical
+        # Provides warranty claim contact information - critical for customer satisfaction
+        # Uses conversation context to detect claims-related queries
         if state.get("current_intent") == "QueryPolicyDetails" and \
            any(keyword in state.get("conversation_summary", "").lower() for keyword in ["reportar", "valida", "garantia"]):
-           # Using conversation_summary for context if intent is general
             print("Rule Fired: Provide Warranty Claim Contact Info")
             return {
                 "action_type": "provide_info",
@@ -93,8 +152,9 @@ class RuleEngine:
                 "message_to_customer": "Para hacer válida su garantía, puede reportar a través de nuestro call center: 800 garanti (4272684) o WhatsApp 4432441212."
             }
 
-        # Rule 4: Answer "Puedo renovar si mi garantía ya expiró?" (RenovatePolicy / QueryExpiredRenewal)
-        # This is a direct answer from the FAQs.
+        # RULE 4: EXPIRED POLICY RENEWAL - Business Policy Clarification
+        # Handles questions about renewing expired policies - important for revenue recovery
+        # Uses conversation context to detect expiration-related concerns
         if state.get("current_intent") == "RenovatePolicy" and \
            any(keyword in state.get("conversation_summary", "").lower() for keyword in ["expiró", "vencida", "pasada"]):
             print("Rule Fired: Provide Expired Renewal Policy")
@@ -104,7 +164,9 @@ class RuleEngine:
                 "message_to_customer": "Sí, puede renovar si su garantía ya expiró, pero no debe exceder de 30 días posterior al fin de vigencia y haber cumplido con los servicios en tiempo y forma."
             }
         
-        # Rule 5: Answer "Formas de pago o promociones?" (GetQuote / QueryPaymentOptions)
+        # RULE 5: PAYMENT OPTIONS - Sales Support Information
+        # Provides payment method information when customers ask about financing
+        # Promotes the MSI (Months Without Interest) program to increase conversion
         if state.get("current_intent") == "GetQuote" and \
            any(keyword in state.get("conversation_summary", "").lower() for keyword in ["pago", "promociones", "msi"]):
             print("Rule Fired: Provide Payment Options")
@@ -114,10 +176,15 @@ class RuleEngine:
                 "message_to_customer": "El pago se realiza a través de transferencia o tarjeta. Actualmente contamos con la promoción de hasta 12 Meses Sin Intereses (MSI)."
             }
 
-        # --- CORE RENOVATION FLOW RULES (GUIDING THE CONVERSATION) ---
+        # ========================================================================
+        # MEDIUM PRIORITY RULES - CORE CONVERSATION FLOW GUIDANCE
+        # ========================================================================
+        # These rules guide the conversation flow to collect necessary information
+        # for processing policy renewals in the correct sequence.
 
-        # Rule 6: Ask for Policy Number (if RenovatePolicy intent and no policy number)
-        # FIXED: Check entities directly instead of state flags
+        # RULE 6: REQUEST POLICY NUMBER - Information Gathering
+        # First step in the renewal process - must collect policy number to proceed
+        # Only triggers for explicit renovation intent to avoid being too aggressive
         if state.get("current_intent") == "RenovatePolicy" and \
            not state.get("entities", {}).get("POLICY_NUMBER"):
             print("Rule Fired: Ask for Policy Number")
@@ -127,8 +194,9 @@ class RuleEngine:
                 "message_to_customer": "Para renovar su póliza, por favor, proporcione su número de póliza."
             }
 
-        # Rule 7: Ask for Vehicle Details (if RenovatePolicy and policy number provided, but no vehicle details)
-        # FIXED: Check entities directly instead of state flags
+        # RULE 7: REQUEST VEHICLE DETAILS - Information Gathering (Renovation Flow)
+        # Second step in renovation - collect vehicle information for accurate quoting
+        # Triggers after policy number is provided but vehicle details are missing
         if state.get("current_intent") == "RenovatePolicy" and \
            state.get("entities", {}).get("POLICY_NUMBER") and \
            not (state.get("entities", {}).get("VEHICLE_MAKE") and 
@@ -140,8 +208,9 @@ class RuleEngine:
                 "message_to_customer": "¡Excelente! Ahora, ¿podría indicarme la marca, modelo y año de su vehículo?"
             }
 
-        # NEW Rule 7b: Ask for Vehicle Details (if QueryPolicyDetails and policy number provided, but no vehicle details)
-        # This handles the case when user just provides policy number and NLP classifies as QueryPolicyDetails
+        # RULE 7B: REQUEST VEHICLE DETAILS - Information Gathering (Policy Query Flow)
+        # Handles cases where customer provides policy number but NLP classifies as general query
+        # Converts policy queries into renovation opportunities when appropriate
         if state.get("current_intent") == "QueryPolicyDetails" and \
            state.get("entities", {}).get("POLICY_NUMBER") and \
            not (state.get("entities", {}).get("VEHICLE_MAKE") and 
@@ -154,12 +223,13 @@ class RuleEngine:
                 "message_to_customer": "Gracias por el número de póliza. Para continuar con su renovación, ¿podría indicarme la marca, modelo y año de su vehículo?"
             }
         
-        # NEW Rule 7c: Handle Vehicle Info Provided - THIS IS THE MISSING RULE FOR TEST 4
-        # This rule handles when user provides vehicle information (regardless of how intent is classified)
+        # RULE 7C: ACKNOWLEDGE VEHICLE INFO - Conversation Flow Transition
+        # Responds when customer provides vehicle information, moving conversation forward
+        # This rule fills a gap in the conversation flow for better user experience
         if self._has_vehicle_info_in_entities(state.get("entities", {})) and \
            self._has_policy_number_in_state(state) and \
            not state.get("quote_provided", False):
-            state["quote_provided"] = True # Mark quote as provided
+            state["quote_provided"] = True # Mark quote as provided to prevent loops
             print("Rule Fired: Generate Quote After Vehicle Info Provided")
             return {
                 "action_type": "generate_quote",
@@ -167,15 +237,16 @@ class RuleEngine:
                 "message_to_customer": "Perfecto. Con la información de su póliza y vehículo, le generaré una cotización para la renovación."
             }
         
-        # Rule 8: Ready for Quote (if all initial info collected and not yet quoted)
-        # FIXED: Check entities directly instead of state flags and handle both intents
+        # RULE 8: GENERATE QUOTE - Business Process Completion
+        # Final step when all required information is collected
+        # Triggers quote generation process and prepares for human handoff
         if (state.get("current_intent") in ["RenovatePolicy", "QueryPolicyDetails"]) and \
            state.get("entities", {}).get("POLICY_NUMBER") and \
            state.get("entities", {}).get("VEHICLE_MAKE") and \
            state.get("entities", {}).get("VEHICLE_MODEL") and \
            not state.get("quote_provided", False): # Ensure quote hasn't been provided yet
-            # In a real scenario, you'd trigger an external quote generation API here.
-            # For MVP, we'll simulate it.
+            # In production, this would trigger an external quote generation API
+            # For MVP, we simulate the quote generation process
             state["quote_provided"] = True # Mark quote as provided in state
             print("Rule Fired: Ready for Quote Generation")
             return {
@@ -184,9 +255,15 @@ class RuleEngine:
                 "message_to_customer": "¡Perfecto! Con esta información, puedo generar una cotización para su renovación. Por favor, espere un momento."
             }
 
-        # --- GENERAL FALLBACK RULES (LOWEST PRIORITY) ---
+        # ========================================================================
+        # LOW PRIORITY RULES - GENERAL FALLBACK RESPONSES
+        # ========================================================================
+        # These rules handle general interactions that don't require specific
+        # business logic but still need appropriate responses.
 
-        # Rule 9: General Greeting Response
+        # RULE 9: GREETING RESPONSE - Customer Experience
+        # Provides a warm, branded greeting that sets the tone for the interaction
+        # Immediately explains BRAIN's purpose and invites engagement
         if state.get("current_intent") == "Greeting":
             print("Rule Fired: General Greeting")
             return {
@@ -195,7 +272,9 @@ class RuleEngine:
                 "message_to_customer": "¡Hola! Soy tu asistente de GarantiPLUS. ¿En qué puedo ayudarte hoy con la renovación de tu garantía extendida?"
             }
 
-        # Rule 10: Request Support Response
+        # RULE 10: SUPPORT REQUEST - Human Escalation
+        # Provides contact information for complex issues that require human assistance
+        # Ensures customers can always reach human support when BRAIN cannot help
         if state.get("current_intent") == "RequestSupport":
             print("Rule Fired: Request Support")
             return {
@@ -204,32 +283,60 @@ class RuleEngine:
                 "message_to_customer": "Entiendo que necesitas ayuda. Por favor, comunícate con nuestro centro de atención al cliente al 800 garanti (4272684) o por WhatsApp al 4432441212 para asistencia personalizada."
             }
 
-        # If no rule fires, return None, so the DecisionEngine can fall back to PolicyModule
+        # ========================================================================
+        # NO RULE MATCHED - POLICY MODULE FALLBACK
+        # ========================================================================
+        # If no explicit rule matches, return None to trigger the policy module
+        # This allows for learned behaviors and edge case handling
         print("No rule fired. Deferring to Policy Module.")
         return None
 
     def _has_vehicle_info_in_entities(self, entities: dict) -> bool:
-        """Check if vehicle information is present in entities (handles both formats)"""
-        # Check uppercase format (from LLM)
+        """
+        Check if vehicle information is present in entities.
+        
+        This helper method handles the dual entity format that can result from
+        different processing paths (LLM vs fallback processing).
+        
+        Args:
+            entities: Dictionary of extracted entities
+            
+        Returns:
+            bool: True if both vehicle make and model are present
+        """
+        # Check uppercase format (typically from LLM processing)
         has_uppercase = ('VEHICLE_MAKE' in entities and 'VEHICLE_MODEL' in entities)
         
-        # Check lowercase format (from fallback)
+        # Check lowercase format (typically from fallback processing)
         has_lowercase = ('vehicle_make' in entities and 'vehicle_model' in entities)
         
         return has_uppercase or has_lowercase
 
     def _has_policy_number_in_state(self, state: dict) -> bool:
-        """Check if policy number exists anywhere in the state"""
+        """
+        Check if policy number exists anywhere in the conversation state.
+        
+        This method provides comprehensive policy number detection by checking:
+        1. Current entities (both uppercase and lowercase formats)
+        2. Conversation history (in case it was mentioned in previous turns)
+        
+        Args:
+            state: Complete conversation state dictionary
+            
+        Returns:
+            bool: True if policy number is found anywhere in the state
+        """
         entities = state.get("entities", {})
         
-        # Check in current entities (both formats)
+        # Check in current entities (both formats from different processing methods)
         if 'POLICY_NUMBER' in entities or 'policy_number' in entities:
             return True
             
-        # Check if it was provided in previous conversation turns
-        # (In case it was in a previous message and not carried over to current entities)
+        # Check conversation history for policy number patterns
+        # This catches cases where policy number was mentioned earlier but not
+        # carried forward in current entity extraction
         conversation_summary = state.get("conversation_summary", "").upper()
-        policy_pattern = r'\b[A-Z]{2,4}\d{5,8}\b'
+        policy_pattern = r'\b[A-Z]{2,4}\d{5,8}\b'  # Standard policy number format
         import re
         if re.search(policy_pattern, conversation_summary):
             return True
