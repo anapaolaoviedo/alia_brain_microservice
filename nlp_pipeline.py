@@ -1,411 +1,460 @@
+# nlp_pipeline.py
 """
-BRAIN NLP Pipeline - Advanced Perception System
-==============================================
+Improved NLP Pipeline - Robust Conversational Understanding
+===========================================================
 
-This module implements BRAIN's "Advanced Perception" capability - the ability to accurately
-understand customer messages and extract meaningful information from natural language.
-
-The pipeline uses a hybrid approach:
-1. Primary: OpenAI GPT-4 for sophisticated natural language understanding
-2. Fallback: Regex/keyword patterns for reliability when LLM fails
-
-This dual-layer approach ensures BRAIN can always understand customer intent, even under
-adverse conditions (API failures, rate limits, network issues).
-
-Key capabilities:
-- Intent recognition (RenovatePolicy, GetQuote, ProvideVehicleInfo, etc.)
-- Entity extraction (policy numbers, vehicle details, contact info)
-- Multilingual support (Spanish/English)
-- Robust error handling and fallback mechanisms
+- Accent-insensitive matching (Spanish-safe)
+- Stricter policy number extraction (no false positives like "HOLA")
+- Plan selection extraction (e.g., "el de 12", "12 meses")
+- Expired-policy detection via flags + entities (EXPIRY_DAYS, EXPIRY_DATE)
+- Services-up-to-date detection (flags["services_ok"])
+- Safer greeting detection (word boundaries)
+- Better contact/vehicle extraction
+- ProvideContactInfo intent when contact is given without other intent
+- Optional LLM front-end with a tight JSON contract
 """
 
+from __future__ import annotations
 import re
-import spacy
-import os
-import time
 import json
-import openai
-from dotenv import load_dotenv
+import unicodedata
+from typing import Dict, Any, Optional
+from datetime import datetime, timedelta
 
-# Load environment variables for API credentials
-load_dotenv()
-print("🔐 OpenAI Key loaded:", os.getenv("OPENAI_API_KEY")[:8] + "...")
+try:
+    import openai
+except Exception:
+    openai = None
 
-class NlpPipeline:
-    """
-    BRAIN's primary sensor with direct OpenAI integration and robust fallback.
-    
-    This class acts as BRAIN's "sensory system" - converting unstructured natural language
-    into structured data that can be processed by the decision engine.
-    
-    Architecture:
-    - Layer 1: OpenAI GPT-4 for advanced understanding
-    - Layer 2: Regex/keyword fallback for reliability
-    - Layer 3: spaCy for basic text preprocessing (optional)
-    """
-    
-    def __init__(self, use_llm=True, retry_delay=2.0):
-        """
-        Initialize the NLP pipeline with LLM and fallback capabilities.
-        
-        Args:
-            use_llm: Whether to attempt OpenAI LLM processing
-            retry_delay: Delay between retries when rate limited
-        """
-        self.use_llm = use_llm
-        self.retry_delay = retry_delay
-        self.llm_failed_count = 0
-        self.max_llm_failures = 3  # After 3 failures, temporarily disable LLM
-        
-        # PRIMARY PROCESSOR: Initialize OpenAI client for advanced NLU
-        if self.use_llm:
+
+# -------------------------
+# Normalization utilities
+# -------------------------
+def _norm(s: str) -> str:
+    """Lowercase + strip accents for robust keyword checks."""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", s.lower())
+    return "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+
+
+# -------------------------
+# Compiled Regex / Constants
+# -------------------------
+GREETING_RE = re.compile(
+    r"\b(hola|hello|hi|buen(?:os|as)\s+(?:dias|d[ií]as|tardes|noches))\b",
+    re.IGNORECASE,
+)
+
+# Require 6–12 alnum, at least one digit (typical policy-like codes).
+POLICY_CUE = r"(?:pol(?:i|í)za|poliza|policy|n(?:u|ú)mero|numero|folio|#)"
+CODE_BODY = r"(?=[A-Z0-9]{6,12}\b)(?=.*\d)[A-Z0-9]+"
+POLICY_WITH_CUE_RE = re.compile(rf"{POLICY_CUE}\s*[:\-]?\s*({CODE_BODY})", re.IGNORECASE)
+POLICY_BARE_RE = re.compile(rf"^\s*({CODE_BODY})\s*$", re.IGNORECASE)
+
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+PHONE_RE = re.compile(r"\b(?:\+?\d{1,3}\s*)?(?:\(?\d{2,4}\)?\s*)?\d{3,4}\s*\d{4}\b")
+YEAR_RE  = re.compile(r"\b(19[8-9]\d|20[0-4]\d)\b")
+
+# Simple brand lexicon (normalized keys -> display names)
+BRANDS = {
+    "toyota": "Toyota", "honda": "Honda", "nissan": "Nissan",
+    "ford": "Ford", "vw": "Volkswagen", "volkswagen": "Volkswagen",
+    "chevrolet": "Chevrolet", "audi": "Audi", "bmw": "BMW",
+    "kia": "Kia", "hyundai": "Hyundai", "mazda": "Mazda",
+    "mercedes": "Mercedes", "mercedes-benz": "Mercedes-Benz",
+    "renault": "Renault", "seat": "SEAT", "fiat": "FIAT",
+    "peugeot": "Peugeot", "jeep": "Jeep", "dodge": "Dodge",
+    "ram": "RAM", "subaru": "Subaru", "mitsubishi": "Mitsubishi",
+}
+
+# Expired tokens (normalized)
+EXPIRED_TOKENS = [
+    "vencio", "vencida", "vencido", "vencimiento",
+    "expirada", "expirado", "expiro", "expirio",   # expirió -> expirio (normalized)
+    "caduca", "caducada", "caducado", "caducidad",
+    "pasada", "ya paso", "se me paso", "ya vencio", "ya expiro",
+]
+
+# Plan selection tokens (normalized)
+PLAN_RE_1 = re.compile(r"\b(12|24|36|48)\s*mes", re.IGNORECASE)
+PLAN_RE_2 = re.compile(r"\b(?:el\s+de\s+)?(12|24|36|48)\b", re.IGNORECASE)
+
+# Date patterns (common Spanish formats)
+DATE_DDMMYYYY = re.compile(r'\b(0?[1-9]|[12]\d|3[01])[\/\-](0?[1-9]|1[0-2])[\/\-](\d{4})\b')
+DATE_YYYYMMDD = re.compile(r'\b(\d{4})[\/\-](0?[1-9]|1[0-2])[\/\-](0?[1-9]|[12]\d|3[01])\b')
+DATE_DD_DE_MES = re.compile(r'\b(0?[1-9]|[12]\d|3[01])\s+de\s+([a-záéíóú]+)\s+(\d{4})\b', re.I)
+MESES = {
+    "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+    "julio":7,"agosto":8,"septiembre":9,"setiembre":9,"octubre":10,"noviembre":11,"diciembre":12
+}
+
+
+# -------------------------
+# Feature detectors
+# -------------------------
+def _extract_policy(text: str) -> Optional[str]:
+    """Extract policy number only when it's very likely a policy."""
+    up = (text or "").upper()
+    m = POLICY_WITH_CUE_RE.search(up)
+    if m:
+        return m.group(1)
+    m2 = POLICY_BARE_RE.match(up)
+    if m2:
+        return m2.group(1)
+    return None
+
+
+def _expired_flag(text: str) -> bool:
+    t = _norm(text)
+    return any(tok in t for tok in EXPIRED_TOKENS)
+
+
+def _detect_greeting(text: str) -> bool:
+    return GREETING_RE.search(text or "") is not None
+
+
+def _extract_plan_selection(text: str) -> Optional[int]:
+    """Return 12/24/36/48 if present in typical phrasings."""
+    t = text or ""
+    n = _norm(t)
+    m = PLAN_RE_1.search(n)
+    if m:
+        return int(m.group(1))
+    m2 = PLAN_RE_2.search(n)
+    if m2:
+        return int(m2.group(1))
+    return None
+
+
+def _services_ok(text: str) -> bool:
+    n = _norm(text)
+    keys = [
+        "servicios al dia", "tengo los servicios al dia", "servicios al corriente",
+        "mantenimientos al dia", "si, al dia", "si al dia", "sí, al dia", "sí al dia",
+        "todo al dia", "servicios al dia y al corriente", "servicios al dia ok"
+    ]
+    return any(k in n for k in keys)
+
+
+def _extract_expiry_info(text: str) -> Dict[str, Any]:
+    """Extract EXPIRY_DAYS and EXPIRY_DATE from text (ayer/hoy or explicit dates)."""
+    out: Dict[str, Any] = {}
+    if not text:
+        return out
+
+    n = _norm(text)
+    today = datetime.utcnow().date()
+
+    if "ayer" in n:
+        out["EXPIRY_DAYS"] = 1
+        out["EXPIRY_DATE"] = str(today - timedelta(days=1))
+        return out
+    if "hoy" in n:
+        out["EXPIRY_DAYS"] = 0
+        out["EXPIRY_DATE"] = str(today)
+        return out
+
+    m = DATE_YYYYMMDD.search(text) or DATE_DDMMYYYY.search(text)
+    if m:
+        try:
+            if m.re is DATE_YYYYMMDD:
+                y, mo, d = map(int, m.groups())
+            else:
+                d, mo, y = map(int, m.groups())
+            dt = datetime(y, mo, d).date()
+            out["EXPIRY_DAYS"] = (today - dt).days
+            out["EXPIRY_DATE"] = str(dt)
+            return out
+        except Exception:
+            pass
+
+    m2 = DATE_DD_DE_MES.search(text)
+    if m2:
+        d, mes, y = m2.groups()
+        mes_n = _norm(mes)
+        if MESES.get(mes_n):
             try:
-                openai.api_key = os.getenv("OPENAI_API_KEY")
-                self.client = openai.OpenAI()
-                print("NLP Pipeline initialized with direct OpenAI integration: Ready to perceive")
-            except Exception as e:
-                print(f"Error initializing OpenAI: {e}")
-                print("Falling back to keyword/regex processing")
-                self.client = None
+                dt = datetime(int(y), MESES[mes_n], int(d)).date()
+                out["EXPIRY_DAYS"] = (today - dt).days
+                out["EXPIRY_DATE"] = str(dt)
+                return out
+            except Exception:
+                pass
+
+    return out
+
+
+def _entity_vehicle(text: str) -> Dict[str, str]:
+    """Heuristic vehicle extraction: brand + (optional) model + year."""
+    out: Dict[str, str] = {}
+
+    t_raw = text or ""
+    t_norm = _norm(t_raw)
+
+    # Brand detection
+    brand_key = None
+    for k in BRANDS.keys():
+        if re.search(rf"\b{k}\b", t_norm):
+            brand_key = k
+            break
+    if brand_key:
+        out["VEHICLE_MAKE"] = BRANDS[brand_key]
+
+    # Year
+    y = YEAR_RE.search(t_raw)
+    if y:
+        out["VEHICLE_YEAR"] = y.group(0)
+
+    # Try model as the token(s) after brand, if any, before year
+    if brand_key:
+        m = re.search(
+            rf"\b{brand_key}\b\s+([a-z0-9\-]+(?:\s+[a-z0-9\-]+)?)",
+            t_norm,
+        )
+        if m:
+            candidate = m.group(1).strip()
+            # Avoid common filler words
+            if not re.match(r"^(es|un|una|mi|tengo|modelo)$", candidate):
+                if not YEAR_RE.search(candidate):
+                    out["VEHICLE_MODEL"] = candidate.upper()
+
+    # If phrased like "es un / tengo un / mi auto"
+    if not out and re.search(r"\b(es un|tengo un|mi auto|mi carro|it's a)\b", t_norm):
+        if y:
+            out["VEHICLE_YEAR"] = y.group(0)
+
+    return out
+
+
+def _normalize_entities(entities: Dict[str, Any]) -> Dict[str, Any]:
+    """Map to canonical uppercase keys used by the Rule Engine."""
+    normalized: Dict[str, Any] = {}
+    mappings = {
+        "vehicle_make": "VEHICLE_MAKE",
+        "vehicle_model": "VEHICLE_MODEL",
+        "vehicle_year": "VEHICLE_YEAR",
+        "customer_name": "CUSTOMER_NAME",
+        "policy_number": "POLICY_NUMBER",
+        "email": "EMAIL",
+        "phone_number": "PHONE_NUMBER",
+        "plan_selection": "PLAN_SELECTION",
+        "expiry_days": "EXPIRY_DAYS",
+        "expiry_date": "EXPIRY_DATE",
+    }
+    for k, v in entities.items():
+        standard_key = mappings.get(k.lower(), k.upper())
+        normalized[standard_key] = v
+    return normalized
+
+
+# -------------------------
+# Pipeline
+# -------------------------
+class NlpPipeline:
+    def __init__(self, use_llm: bool = True):
+        self.use_llm = use_llm and (openai is not None)
+        if self.use_llm:
+            self.client = openai.OpenAI()
         else:
-            print("NLP Pipeline initialized in fallback mode (keyword/regex only)")
             self.client = None
 
-        # SECONDARY PROCESSOR: Load basic spaCy model for text preprocessing
-        # Used for tokenization, normalization, and basic linguistic analysis
-        try:
-            self.nlp_basic = spacy.load("en_core_web_sm")
-        except:
-            print("Warning: spaCy model not found. Using basic text processing.")
-            self.nlp_basic = None
-
-    def process_message(self, text: str) -> dict:
+    def process_message(self, text: str) -> Dict[str, Any]:
         """
-        Main processing pipeline: Convert natural language to structured intent + entities.
-        
-        This is BRAIN's core perception function that transforms raw customer messages
-        into actionable intelligence for the decision engine.
-        
-        Processing flow:
-        1. Try OpenAI LLM for sophisticated understanding
-        2. Fall back to regex/keyword patterns if LLM fails
-        3. Normalize and merge results from both approaches
-        4. Return structured data ready for decision making
-        
-        Args:
-            text: Raw customer message (e.g., "Hola, quiero renovar mi póliza ABC123")
-            
         Returns:
-            dict: {
-                "intent": "RenovatePolicy",
-                "entities": {"policy_number": "ABC123"},
-                "processing_method": "llm" or "fallback"
+            {
+                "intent": str,
+                "entities": { ... normalized ... },
+                "flags": {"expired": bool, "services_ok": bool},
+                "processing_method": "llm" | "fallback"
             }
         """
-        # Initialize result variables
+        if self.client:
+            out = self._process_with_llm(text)
+            if out is not None:
+                # augment with local extractors (flags + expiry entities)
+                flags = {
+                    "expired": _expired_flag(text),
+                    "services_ok": _services_ok(text),
+                }
+                # merge in expiry info if any
+                extra = self._extract_entities_local(text)
+                merged_entities = {**out.get("entities", {}), **extra}
+                out["entities"] = _normalize_entities(merged_entities)
+                out["flags"] = flags
+                out["processing_method"] = "llm"
+
+                # If Unknown but we clearly have contact, promote to ProvideContactInfo
+                if out.get("intent") in (None, "", "Unknown"):
+                    out = self._maybe_promote_contact_intent(text, out)
+                return out
+
+        # Fallback
+        out_fb = self._enhanced_fallback_processing(text)
+        out_fb["flags"] = {
+            "expired": _expired_flag(text),
+            "services_ok": _services_ok(text),
+        }
+        out_fb["processing_method"] = "fallback"
+        return out_fb
+
+    # -------------------------
+    # LLM Front-End
+    # -------------------------
+    def _process_with_llm(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Calls GPT with a tight JSON contract. If parsing fails, return None to fallback.
+        """
+        try:
+            resp = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0.1,
+                max_tokens=260,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an NLP system for a conversational insurance agent. "
+                            "Classify the user's message into EXACTLY ONE intent from this list:\n"
+                            "RenovatePolicy, GetQuote, QueryPolicyDetails, ProvideVehicleInfo, "
+                            "ProvideContactInfo, CancelRenovation, Greeting, RequestSupport, "
+                            "ConfirmRenovation, AskForClarification, Disagreement, Confusion, Unknown.\n\n"
+                            "Rules:\n"
+                            "- 'ConfirmRenovation' only if it's an explicit affirmative to proceed (sí, claro, perfecto) in context.\n"
+                            "- Do NOT infer 'ConfirmRenovation' from a bare 'ok' unless it clearly agrees to proceed.\n"
+                            "- If the message is a single code-like token (6–12 alnum, at least one digit), treat as 'QueryPolicyDetails'.\n"
+                            "- Extract entities: POLICY_NUMBER, VEHICLE_MAKE, VEHICLE_MODEL, VEHICLE_YEAR, "
+                            "CUSTOMER_NAME, EMAIL, PHONE_NUMBER, PLAN_SELECTION (12/24/36/48 if present).\n"
+                            "- Return ONLY valid JSON (no markdown) with keys: intent, entities (object)."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+            )
+            content = resp.choices[0].message.content.strip()
+            # Some models wrap in ```json; strip safely
+            if content.startswith("```"):
+                content = content.strip("`")
+                if content.lower().startswith("json"):
+                    content = content[4:].strip()
+            data = json.loads(content)
+
+            intent = data.get("intent", "Unknown") or "Unknown"
+            entities = data.get("entities", {}) or {}
+
+            # Merge/override with local extractors
+            entities_auto = self._extract_entities_local(text)
+            entities = {**entities, **entities_auto}
+
+            print(f"🤖 LLM Result: Intent={intent}, Entities={entities}")
+            return {"intent": intent, "entities": _normalize_entities(entities)}
+        except Exception as e:
+            print(f"LLM failed: {e}")
+            return None
+
+    # -------------------------
+    # Deterministic Fallback
+    # -------------------------
+    def _enhanced_fallback_processing(self, text: str) -> Dict[str, Any]:
+        t = (text or "").strip()
+        t_lower = t.lower()
+        t_norm = _norm(t)
+
         detected_intent = "Unknown"
-        extracted_entities = {}
+        extracted_entities: Dict[str, Any] = {}
 
-        # PRIMARY PATH: Try OpenAI LLM processing if available and not failed too many times
-        if self.client and self.llm_failed_count < self.max_llm_failures:
-            print(f"\n--- DEBUG: Processing with OpenAI LLM for text: '{text.strip()}' ---")
-            try:
-                # Call OpenAI API with carefully crafted system prompt
-                # The prompt is designed to handle insurance-specific intents and multilingual input
-                response = self.client.chat.completions.create(
-                    model="gpt-4o-mini",  # Balance of performance and cost
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": """You are an AI assistant for a car insurance company. 
-                            
-                            Classify the user's intent into ONE of: 
-                            - RenovatePolicy: User wants to renew their insurance policy
-                            - GetQuote: User asks for price/quote
-                            - QueryPolicyDetails: User provides policy number or asks about policy
-                            - ProvideVehicleInfo: User provides vehicle make, model, year (like "Honda Civic 2020", "es un VW Vento 2015")
-                            - ProvideContactInfo: User provides name, email, phone
-                            - CancelRenovation: User wants to cancel
-                            - Greeting: Hello, good morning, etc.
-                            - RequestSupport: User asks for help
-                            - ConfirmRenovation: User confirms with "sí", "confirmo", "proceda", "adelante"
-                            - Unknown: Cannot determine intent
-                            
-                            Extract entities for: POLICY_NUMBER, VEHICLE_MAKE, VEHICLE_MODEL, VEHICLE_YEAR, CUSTOMER_NAME, EMAIL, PHONE_NUMBER, VIN.
-                            
-                            IMPORTANT CONTEXT RULES:
-                            - If user says "es un [brand] [model] [year]" = ProvideVehicleInfo
-                            - If user says "sí", "confirmo", "proceda", "adelante" after discussing renovation = ConfirmRenovation
-                            - "renovar", "renovación" = RenovatePolicy
-                            - Always preserve and extract policy numbers, names, emails, vehicle info
-                            
-                            Examples:
-                            - "Es un auto Honda Civic 2020" → ProvideVehicleInfo
-                            - "Mi carro es un VW Vento 2015" → ProvideVehicleInfo
-                            - "Tengo un Toyota Corolla del 2018" → ProvideVehicleInfo
-                            
-                            Respond ONLY with valid JSON:
-                            {"intent": "IntentName", "entities": {"entity_type": "value"}}"""
-                        },
-                        {
-                            "role": "user", 
-                            "content": text
-                        }
-                    ],
-                    temperature=0.1,  # Low temperature for consistent, deterministic responses
-                    max_tokens=300
-                )
-                
-                # Extract and clean the response content
-                content = response.choices[0].message.content.strip()
-                
-                # Handle markdown-wrapped JSON responses
-                if content.startswith("```json"):
-                    content = content.replace("```json", "").replace("```", "").strip()
-                
-                # Parse the structured response
-                parsed_output = json.loads(content)
-                detected_intent = parsed_output.get("intent", "Unknown")
-                extracted_entities = parsed_output.get("entities", {})
+        # 1) Exact conversational shortcuts
+        if t_lower in {"?", "¿?", "???"}:
+            detected_intent = "Confusion"
+        elif t_lower in {"no", "no gracias", "no quiero", "nope"}:
+            detected_intent = "Disagreement"
+        elif t_lower in {"sí", "si", "yes", "claro", "está bien", "de acuerdo", "perfecto"}:
+            detected_intent = "ConfirmRenovation"
+        elif t_lower in {"con qué?", "con que?", "cómo?", "como?", "qué?", "que?", "explícame", "no entiendo"}:
+            detected_intent = "AskForClarification"
 
-                print(f"--- DEBUG: LLM Intent: {detected_intent}")
-                print(f"--- DEBUG: LLM Entities: {extracted_entities}")
+        # 2) Greetings
+        elif _detect_greeting(t):
+            detected_intent = "Greeting"
 
-                # Reset failure count on successful processing
-                self.llm_failed_count = 0
-                
-                # HYBRID APPROACH: Supplement LLM with fallback if results are incomplete
-                # This ensures we don't miss obvious patterns that regex might catch
-                if detected_intent == "Unknown" or not extracted_entities:
-                    print("Supplementing with fallback processing...")
-                    fallback_intent, fallback_entities = self._fallback_processing(text)
-                    if detected_intent == "Unknown":
-                        detected_intent = fallback_intent
-                    # Normalize and merge entities from both approaches
-                    normalized_fallback = self._normalize_entities(fallback_entities)
-                    normalized_extracted = self._normalize_entities(extracted_entities)
-                    extracted_entities = {**normalized_fallback, **normalized_extracted}
+        # 3) Domain intents (tokens)
+        elif any(w in t_norm for w in ["renovar", "renovacion", "renovación", "renew"]):
+            detected_intent = "RenovatePolicy"
+        elif any(w in t_norm for w in ["precio", "costo", "cuanto", "cuánto", "quote", "cotizacion", "cotización"]):
+            detected_intent = "GetQuote"
+        elif any(w in t_norm for w in ["ayuda", "help", "soporte", "support"]):
+            detected_intent = "RequestSupport"
+        elif any(w in t_norm for w in ["cancelar", "cancel", "terminar"]):
+            detected_intent = "CancelRenovation"
 
-            except json.JSONDecodeError as json_error:
-                # Handle malformed JSON responses from OpenAI
-                print(f"--- DEBUG: JSON parsing error: {json_error}")
-                print(f"Raw response: {content if 'content' in locals() else 'No content'}")
-                detected_intent, extracted_entities = self._fallback_processing(text)
-                extracted_entities = self._normalize_entities(extracted_entities)
-                
-            except Exception as llm_error:
-                # Handle API errors, rate limits, network issues, etc.
-                self.llm_failed_count += 1
-                print(f"--- DEBUG: Error during LLM processing: {llm_error}")
-                
-                # Special handling for rate limits - wait before falling back
-                if "429" in str(llm_error) or "rate_limit" in str(llm_error).lower():
-                    print(f"Rate limited. Waiting {self.retry_delay}s before fallback...")
-                    time.sleep(self.retry_delay)
-                
-                # Temporarily disable LLM after too many failures
-                if self.llm_failed_count >= self.max_llm_failures:
-                    print(f"Temporarily disabling LLM after {self.llm_failed_count} failures")
-                
-                print("Using fallback processing...")
-                detected_intent, extracted_entities = self._fallback_processing(text)
-                extracted_entities = self._normalize_entities(extracted_entities)
+        # 4) Policy number detection (strict)
+        if detected_intent == "Unknown":
+            pol = _extract_policy(t)
+            if pol:
+                detected_intent = "QueryPolicyDetails"
+                extracted_entities["policy_number"] = pol
 
-        else:
-            # FALLBACK PATH: Use regex/keyword processing when LLM is unavailable
-            reason = "disabled due to failures" if self.llm_failed_count >= self.max_llm_failures else "not initialized"
-            print(f"--- DEBUG: Processing with fallback ({reason}) ---")
-            detected_intent, extracted_entities = self._fallback_processing(text)
-            extracted_entities = self._normalize_entities(extracted_entities)
+        # 5) Entities (contact/vehicle/plan/expiry)
+        ents = self._extract_entities_local(t)
+        extracted_entities.update(ents)
 
-        # Return structured results for the decision engine
+        # 6) Promote to ProvideContactInfo if we got contact and nothing else
+        if detected_intent == "Unknown":
+            if any(k in extracted_entities for k in ("email", "phone_number", "customer_name")):
+                detected_intent = "ProvideContactInfo"
+
+        print(f"🔧 Fallback Result: Intent={detected_intent}, Entities={extracted_entities}")
         return {
             "intent": detected_intent,
-            "entities": extracted_entities,
-            "processing_method": "llm" if self.client and self.llm_failed_count < self.max_llm_failures else "fallback"
+            "entities": _normalize_entities(extracted_entities),
         }
-    
-    def _normalize_entities(self, entities: dict) -> dict:
-        """
-        Normalize entity keys to consistent format for downstream processing.
-        
-        The decision engine expects standardized entity keys (UPPER_CASE format).
-        This method ensures consistency regardless of which processing method was used.
-        
-        Args:
-            entities: Raw entities dict with potentially inconsistent key formats
-            
-        Returns:
-            dict: Normalized entities with standardized keys
-        """
-        normalized = {}
-        
-        # Standard entity key mappings
-        entity_mappings = {
-            'vehicle_make': 'VEHICLE_MAKE',
-            'vehicle_model': 'VEHICLE_MODEL', 
-            'vehicle_year': 'VEHICLE_YEAR',
-            'customer_name': 'CUSTOMER_NAME',
-            'policy_number': 'POLICY_NUMBER',
-            'email': 'EMAIL',
-            'phone_number': 'PHONE_NUMBER',
-            'vin': 'VIN'
-        }
-        
-        for key, value in entities.items():
-            # Use mapping if exists, otherwise convert to uppercase
-            standard_key = entity_mappings.get(key.lower(), key.upper())
-            normalized[standard_key] = value
-            
-        return normalized
-    
-    def _fallback_processing(self, text: str) -> tuple:
-        """
-        Robust fallback processing using regex patterns and keyword matching.
-        
-        This method provides reliability when the LLM is unavailable. It uses
-        carefully crafted patterns to handle common insurance scenarios and
-        multilingual input (Spanish/English).
-        
-        Args:
-            text: Raw customer message to process
-            
-        Returns:
-            tuple: (detected_intent, extracted_entities)
-        """
-        detected_intent = "Unknown"
-        extracted_entities = {}
-        normalized_text = text.lower()
-        
-        # INTENT DETECTION: Keyword-based intent classification with priority ordering
-        # Order matters - more specific intents should be checked first
-        intent_keywords = {
-            "ConfirmRenovation": ["sí", "si", "confirmo", "confirmó", "proceda", "proceder", "adelante", "de acuerdo", "está bien", "ok", "yes", "confirm", "proceed"],
-            "RenovatePolicy": ["renovar", "renovacion", "renovación", "renovar poliza", "renovar póliza", "renovarla", "renovarlo", "renew", "renewal", "extend policy"],
-            "CancelRenovation": ["cancelar", "cancelarla", "cancelar renovacion", "cancelar renovación", "cancelar proceso", "cancel", "stop", "terminate", "no quiero"],
-            "Greeting": ["hola", "que tal", "qué tal", "buenos dias", "buenos días", "buenas tardes", "hello", "hi", "hey", "good morning"],
-            "RequestSupport": ["ayuda", "soporte", "asistencia", "help", "support", "assistance", "problema"],
-            "GetQuote": ["precio", "cotizar", "cotizacion", "cotización", "costo", "quote", "price", "cost", "estimate"],
-            "QueryPolicyDetails": ["poliza", "póliza", "detalles", "informacion", "información", "consultar", "policy", "details", "information", "status"],
-            "ProvideVehicleInfo": ["es un", "tengo un", "mi carro", "mi auto", "mi vehículo", "it's a", "i have a", "my car"]
-        }
-        
-        # Find the first matching intent (priority order)
-        for intent, keywords in intent_keywords.items():
-            if any(keyword in normalized_text for keyword in keywords):
-                detected_intent = intent
-                break
 
-        # ENTITY EXTRACTION: Regex patterns for structured data extraction
-        patterns = {
-            # Policy numbers: 2-4 letters followed by 5-8 digits (e.g., "ABC12345")
-            "policy_number": r'\b[A-Z]{2,4}\d{5,8}\b',
-            
-            # Email addresses: Standard email regex pattern
-            "email": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-            
-            # Phone numbers: Flexible pattern for various formats
-            "phone_number": r'(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{4,6}',
-            
-            # VIN numbers: Standard 17-character format (excluding I, O, Q)
-            "vin": r'\b[A-HJ-NPR-Z0-9]{17}\b',
-            
-            # Vehicle years: 1980-2049 range
-            "vehicle_year": r'\b(19[8-9]\d|20[0-4]\d)\b',
-            
-            # Customer IDs: Various ID formats
-            "customer_id": r'\b(?:ID|id|Id)[-:\s]*([A-Z0-9]{4,12})\b'
-        }
-        
-        # Apply regex patterns to extract entities
-        for entity_type, pattern in patterns.items():
-            # Use case-sensitive matching for policy numbers and VINs
-            flags = re.IGNORECASE if entity_type not in ["policy_number", "vin"] else 0
-            search_text = text.upper() if entity_type in ["policy_number", "vin"] else text
-            match = re.search(pattern, search_text, flags)
-            if match:
-                # Extract the captured group for customer_id, otherwise the full match
-                extracted_entities[entity_type] = match.group(1) if entity_type == "customer_id" else match.group(0)
-        
-        # VEHICLE MAKE DETECTION: Brand recognition with common variations
-        car_makes = {
-            "Volkswagen": ["vw", "volkswagen"], 
-            "Honda": ["honda"], 
-            "Toyota": ["toyota"], 
-            "Ford": ["ford"], 
-            "Audi": ["audi"], 
-            "Nissan": ["nissan"],
-            "Chevrolet": ["chevrolet", "chevy"], 
-            "BMW": ["bmw"],
-            "Mercedes": ["mercedes", "mercedes-benz", "benz"], 
-            "Hyundai": ["hyundai"],
-            "Kia": ["kia"], 
-            "Mazda": ["mazda"], 
-            "Subaru": ["subaru"], 
-            "Jeep": ["jeep"]
-        }
-        
-        # Find vehicle make in text
-        for make, variants in car_makes.items():
-            if any(variant in normalized_text for variant in variants):
-                extracted_entities["vehicle_make"] = make
-                break
-        
-        # VEHICLE MODEL DETECTION: Common model names
-        common_models = {
-            "vento": "Vento", "civic": "Civic", "accord": "Accord", "corolla": "Corolla", 
-            "camry": "Camry", "focus": "Focus", "fiesta": "Fiesta", "sentra": "Sentra", 
-            "altima": "Altima", "versa": "Versa", "jetta": "Jetta", "golf": "Golf"
-        }
-        
-        # Find vehicle model in text
-        for model_key, model_name in common_models.items():
-            if model_key in normalized_text:
-                extracted_entities["vehicle_model"] = model_name
-                break
-        
-        # CUSTOMER NAME EXTRACTION: Multiple patterns for Spanish/English
-        name_patterns = [
-            (r"my name is ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
-            (r"me llamo ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
-            (r"soy ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
-            (r"nombre[:\s]+([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1),
-            (r"mi nombre es ([A-Za-zÀ-ÿ]+(?:\s+[A-Za-zÀ-ÿ]+)?)", 1)
-        ]
-        
-        # Try each name pattern
-        for pattern, group in name_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                name = match.group(group).strip().title()
-                # Validate name (no digits, reasonable length)
-                if len(name) > 1 and not any(char.isdigit() for char in name):
-                    extracted_entities["customer_name"] = name
-                    break
-        
-        print(f"🔧 Fallback results - Intent: {detected_intent}, Entities: {extracted_entities}")
-        return detected_intent, extracted_entities
-    
-    def reset_llm_failures(self):
-        """
-        Reset LLM failure count to re-enable LLM processing.
-        
-        This method can be called externally to reset the failure counter
-        and give the LLM another chance after temporary issues are resolved.
-        """
-        self.llm_failed_count = 0
-        print("LLM failure count reset. LLM processing re-enabled.")
-    
-    def get_status(self):
-        """
-        Get current pipeline status for monitoring and debugging.
-        
-        Returns:
-            dict: Current status including LLM availability and failure count
-        """
-        return {
-            "llm_enabled": self.client is not None,
-            "llm_failures": self.llm_failed_count,
-            "llm_temp_disabled": self.llm_failed_count >= self.max_llm_failures,
-            "processing_mode": "llm" if self.client and self.llm_failed_count < self.max_llm_failures else "fallback"
-        }
+    # -------------------------
+    # Local entity extraction (shared)
+    # -------------------------
+    def _extract_entities_local(self, text: str) -> Dict[str, Any]:
+        entities: Dict[str, Any] = {}
+
+        # Policy
+        pol = _extract_policy(text)
+        if pol:
+            entities["policy_number"] = pol
+
+        # Email
+        m = EMAIL_RE.search(text or "")
+        if m:
+            entities["email"] = m.group(0)
+
+        # Phone
+        m = PHONE_RE.search(text or "")
+        if m:
+            entities["phone_number"] = m.group(0)
+
+        # Customer name (very light heuristic)
+        t_lower = (text or "").lower()
+        name_m = re.search(r"\b(me llamo|mi nombre es)\s+([a-záéíóúñ\s]{2,60})$", t_lower)
+        if name_m:
+            name = name_m.group(2).strip()
+            entities["customer_name"] = " ".join(w.capitalize() for w in name.split())
+
+        # Plan selection
+        plan = _extract_plan_selection(text or "")
+        if plan is not None:
+            entities["plan_selection"] = int(plan)
+
+        # Expiry info (days/date)
+        entities.update(_extract_expiry_info(text or ""))
+
+        # Vehicle
+        entities.update(_entity_vehicle(text or ""))
+
+        return entities
+
+    def _maybe_promote_contact_intent(self, text: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """If we clearly have contact info but Unknown intent, promote to ProvideContactInfo."""
+        ents = payload.get("entities", {})
+        # entities might be normalized already; check both cases
+        if any(k in ents for k in ("EMAIL", "PHONE_NUMBER", "CUSTOMER_NAME")) or \
+           any(k in ents for k in ("email", "phone_number", "customer_name")):
+            payload["intent"] = "ProvideContactInfo"
+        return payload
