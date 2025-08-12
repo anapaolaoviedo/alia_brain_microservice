@@ -132,7 +132,7 @@ def _services_ok(text: str) -> bool:
     keys = [
         "servicios al dia", "tengo los servicios al dia", "servicios al corriente",
         "mantenimientos al dia", "si, al dia", "si al dia", "sí, al dia", "sí al dia",
-        "todo al dia", "servicios al dia y al corriente", "servicios al dia ok"
+        "todo al dia", "servicios al dia y al corriente", "servicios al dia ok" , "si"
     ]
     return any(k in n for k in keys)
 
