@@ -308,7 +308,7 @@ class NlpPipeline:
         try:
             resp = self.client.chat.completions.create(
                 model="gpt-4o-mini",
-                temperature=0.1,
+                temperature=0.3,
                 max_tokens=260,
                 messages=[
                     {
@@ -318,7 +318,7 @@ class NlpPipeline:
                             "Classify the user's message into EXACTLY ONE intent from this list:\n"
                             "RenovatePolicy, GetQuote, QueryPolicyDetails, ProvideVehicleInfo, "
                             "ProvideContactInfo, CancelRenovation, Greeting, RequestSupport, "
-                            "ConfirmRenovation, AskForClarification, Disagreement, Confusion, Unknown.\n\n"
+                            "ConfirmRenovation, AskForClarification, Disagreement, Confusion, Unknown, Bye, ThankYou.\n\n"
                             "Rules:\n"
                             "- 'ConfirmRenovation' only if it's an explicit affirmative to proceed (sí, claro, perfecto) in context.\n"
                             "- Do NOT infer 'ConfirmRenovation' from a bare 'ok' unless it clearly agrees to proceed.\n"
