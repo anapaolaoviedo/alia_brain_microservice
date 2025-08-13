@@ -318,7 +318,7 @@ class NlpPipeline:
                             "Classify the user's message into EXACTLY ONE intent from this list:\n"
                             "RenovatePolicy, GetQuote, QueryPolicyDetails, ProvideVehicleInfo, "
                             "ProvideContactInfo, CancelRenovation, Greeting, RequestSupport, "
-                            "ConfirmRenovation, AskForClarification, Disagreement, Confusion, Unknown, Bye, ThankYou.\n\n"
+                            "ConfirmRenovation, AskForClarification, Disagreement, Confusion, Unknown, Bye, ThankYou, ExpiredPolicy\n\n"
                             "Rules:\n"
                             "- 'ConfirmRenovation' only if it's an explicit affirmative to proceed (sí, claro, perfecto) in context.\n"
                             "- Do NOT infer 'ConfirmRenovation' from a bare 'ok' unless it clearly agrees to proceed.\n"
@@ -372,12 +372,20 @@ class NlpPipeline:
             detected_intent = "ConfirmRenovation"
         elif t_lower in {"con qué?", "con que?", "cómo?", "como?", "qué?", "que?", "explícame", "no entiendo"}:
             detected_intent = "AskForClarification"
+        elif t_lower in {"adios", "adiós", "hasta pronto", "bye", "chao", "nos vemos", "hasta luego", "goodbye"}:
+            detected_intent = "Bye"
+        elif t_lower in {"gracias", "muchas gracias", "thank you", "thanks", "te agradezco", "muy amable"}:
+            detected_intent = "ThankYou"
 
-        # 2) Greetings
+        # 2) Greetings 
         elif _detect_greeting(t):
             detected_intent = "Greeting"
 
-        # 3) Domain intents (tokens)
+        # 3) Check for expired policy intent (using existing expired flag logic)
+        elif _expired_flag(t) or any(w in t_norm for w in ["vencida", "expirada", "caducada", "ya vencio", "se vencio"]):
+            detected_intent = "ExpiredPolicy"
+
+        # 4) Domain intents (tokens)
         elif any(w in t_norm for w in ["renovar", "renovacion", "renovación", "renew"]):
             detected_intent = "RenovatePolicy"
         elif any(w in t_norm for w in ["precio", "costo", "cuanto", "cuánto", "quote", "cotizacion", "cotización"]):
@@ -387,18 +395,18 @@ class NlpPipeline:
         elif any(w in t_norm for w in ["cancelar", "cancel", "terminar"]):
             detected_intent = "CancelRenovation"
 
-        # 4) Policy number detection (strict)
+        # 5) Policy number detection (strict)
         if detected_intent == "Unknown":
             pol = _extract_policy(t)
             if pol:
                 detected_intent = "QueryPolicyDetails"
                 extracted_entities["policy_number"] = pol
 
-        # 5) Entities (contact/vehicle/plan/expiry)
+        # 6) Entities (contact/vehicle/plan/expiry)
         ents = self._extract_entities_local(t)
         extracted_entities.update(ents)
 
-        # 6) Promote to ProvideContactInfo if we got contact and nothing else
+    # 7) Promote to ProvideContactInfo if we got contact and nothing else
         if detected_intent == "Unknown":
             if any(k in extracted_entities for k in ("email", "phone_number", "customer_name")):
                 detected_intent = "ProvideContactInfo"
@@ -407,7 +415,7 @@ class NlpPipeline:
         return {
             "intent": detected_intent,
             "entities": _normalize_entities(extracted_entities),
-        }
+    }
 
     # -------------------------
     # Local entity extraction (shared)
